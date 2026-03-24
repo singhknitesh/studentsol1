@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Component } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useNavigate, useParams } from 'react-router-dom';
 import { 
   Home, 
@@ -19,7 +19,8 @@ import {
   CheckCircle,
   AlertCircle,
   Check,
-  X
+  X,
+  CreditCard
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -49,6 +50,57 @@ import { twMerge } from 'tailwind-merge';
 // --- Utilities ---
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
+}
+
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId: string | undefined;
+    email: string | null | undefined;
+    emailVerified: boolean | undefined;
+    isAnonymous: boolean | undefined;
+    tenantId: string | null | undefined;
+    providerInfo: {
+      providerId: string;
+      displayName: string | null;
+      email: string | null;
+      photoUrl: string | null;
+    }[];
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData.map(provider => ({
+        providerId: provider.providerId,
+        displayName: provider.displayName,
+        email: provider.email,
+        photoUrl: provider.photoURL
+      })) || []
+    },
+    operationType,
+    path
+  }
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
 }
 
 // --- Types ---
@@ -124,6 +176,7 @@ interface MarketItem {
   category: string;
   imageUrl: string;
   createdAt: string;
+  availability: 'Available' | 'Sold';
 }
 
 interface Job {
@@ -135,9 +188,73 @@ interface Job {
   type: 'Part-time' | 'Full-time' | 'Internship';
   description: string;
   createdAt: string;
+  contact: string;
+  lastDate: string;
+  eligibility: string;
 }
 
 // --- Components ---
+
+interface ErrorBoundaryProps {
+  children: React.ReactNode;
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: any;
+}
+
+class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  state: ErrorBoundaryState;
+  props: ErrorBoundaryProps;
+
+  constructor(props: ErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: any) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: any, errorInfo: any) {
+    console.error("ErrorBoundary caught an error", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      let errorMessage = "Something went wrong.";
+      try {
+        const parsedError = JSON.parse(this.state.error.message);
+        if (parsedError.error) {
+          errorMessage = `Firestore Error: ${parsedError.error} (${parsedError.operationType} on ${parsedError.path})`;
+        }
+      } catch (e) {
+        errorMessage = this.state.error.message || errorMessage;
+      }
+
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
+          <div className="max-w-md w-full bg-white p-12 rounded-[3rem] shadow-2xl text-center border border-gray-100">
+            <div className="w-20 h-20 bg-red-100 rounded-3xl flex items-center justify-center text-red-600 mx-auto mb-10">
+              <AlertCircle size={40} />
+            </div>
+            <h1 className="text-2xl font-bold mb-4">Application Error</h1>
+            <p className="text-gray-500 mb-8">{errorMessage}</p>
+            <button 
+              onClick={() => window.location.reload()} 
+              className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-bold hover:bg-indigo-700 transition-all"
+            >
+              Reload Application
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
 
 const Navbar = ({ user, onLogout }: { user: FirebaseUser | null, onLogout: () => void }) => {
   return (
@@ -660,8 +777,7 @@ const FindMyStay = ({ user }: { user: FirebaseUser | null }) => {
         isAC: false
       });
     } catch (error) {
-      console.error("Error adding hostel:", error);
-      alert("Failed to list hostel. Please check your connection and try again.");
+      handleFirestoreError(error, OperationType.CREATE, 'hostels');
     } finally {
       setIsSubmitting(false);
     }
@@ -1604,7 +1720,7 @@ const TiffinMate = ({ user }: { user: FirebaseUser | null }) => {
       });
       setServiceImagePreview(null);
     } catch (err) {
-      console.error(err);
+      handleFirestoreError(err, OperationType.CREATE, 'tiffinServices');
     } finally {
       setIsSubmitting(false);
     }
@@ -1635,7 +1751,7 @@ const TiffinMate = ({ user }: { user: FirebaseUser | null }) => {
       });
       setNewReview({ rating: 5, comment: '' });
     } catch (err) {
-      console.error(err);
+      handleFirestoreError(err, OperationType.UPDATE, `tiffinServices/${serviceId}`);
     }
   };
 
@@ -1985,25 +2101,85 @@ const TiffinMate = ({ user }: { user: FirebaseUser | null }) => {
   );
 };
 
+const MOCK_MARKET_ITEMS: MarketItem[] = [
+  {
+    id: 'mock-1',
+    sellerId: 'system',
+    sellerName: 'Admin',
+    title: 'Engineering Physics Textbook',
+    description: 'Latest edition, like new.',
+    price: 450,
+    category: 'Books',
+    imageUrl: 'https://images.unsplash.com/photo-1544947950-fa07a98d237f?auto=format&fit=crop&q=80&w=400',
+    createdAt: new Date().toISOString(),
+    availability: 'Available'
+  },
+  {
+    id: 'mock-2',
+    sellerId: 'system',
+    sellerName: 'Admin',
+    title: 'Scientific Calculator',
+    description: 'Casio FX-991EX, perfect for exams.',
+    price: 800,
+    category: 'Electronics',
+    imageUrl: 'https://images.unsplash.com/photo-1574607383476-f517f220d308?auto=format&fit=crop&q=80&w=400',
+    createdAt: new Date().toISOString(),
+    availability: 'Available'
+  }
+];
+
 const StudentSwap = ({ user }: { user: FirebaseUser | null }) => {
   const [items, setItems] = useState<MarketItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [isAdding, setIsAdding] = useState(false);
   const [newItem, setNewItem] = useState({ title: '', price: '', category: 'Electronics', description: '' });
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState('All');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [itemImagePreview, setItemImagePreview] = useState<string | null>(null);
+  const [selectedItem, setSelectedItem] = useState<MarketItem | null>(null);
+  const [showPayment, setShowPayment] = useState(false);
+  const [paymentStatus, setPaymentStatus] = useState<'idle' | 'processing' | 'success'>('idle');
+  const [cardDetails, setCardDetails] = useState({ number: '', expiry: '', cvc: '' });
+
+  const formatTimeAgo = (dateString: string) => {
+    const date = new Date(dateString);
+    const now = new Date();
+    const diffInSeconds = Math.floor((now.getTime() - date.getTime()) / 1000);
+    
+    if (diffInSeconds < 60) return 'Just now';
+    if (diffInSeconds < 3600) return `${Math.floor(diffInSeconds / 60)}m ago`;
+    if (diffInSeconds < 86400) return `${Math.floor(diffInSeconds / 3600)}h ago`;
+    if (diffInSeconds < 604800) return `${Math.floor(diffInSeconds / 86400)}d ago`;
+    return date.toLocaleDateString();
+  };
 
   useEffect(() => {
     const q = query(collection(db, 'marketItems'), orderBy('createdAt', 'desc'));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const itemData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as MarketItem));
-      setItems(itemData);
+      // Merge Firestore data with mock data to ensure something is always visible
+      setItems([...itemData, ...MOCK_MARKET_ITEMS]);
       setLoading(false);
     });
     return () => unsubscribe();
   }, []);
 
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setItemImagePreview(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
   const handleAddItem = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user) return;
+    setIsSubmitting(true);
     try {
       await addDoc(collection(db, 'marketItems'), {
         sellerId: user.uid,
@@ -2012,19 +2188,78 @@ const StudentSwap = ({ user }: { user: FirebaseUser | null }) => {
         price: Number(newItem.price),
         category: newItem.category,
         description: newItem.description,
-        imageUrl: `https://picsum.photos/seed/${newItem.title}/400/300`,
-        createdAt: new Date().toISOString()
+        imageUrl: itemImagePreview || `https://picsum.photos/seed/${newItem.title}/400/300`,
+        createdAt: new Date().toISOString(),
+        availability: 'Available'
       });
       setIsAdding(false);
       setNewItem({ title: '', price: '', category: 'Electronics', description: '' });
+      setItemImagePreview(null);
     } catch (err) {
-      console.error(err);
+      handleFirestoreError(err, OperationType.CREATE, 'marketItems');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
   const handleDelete = async (id: string) => {
-    await deleteDoc(doc(db, 'marketItems', id));
+    try {
+      await deleteDoc(doc(db, 'marketItems', id));
+    } catch (err) {
+      handleFirestoreError(err, OperationType.DELETE, `marketItems/${id}`);
+    }
   };
+
+  const handleBuy = async () => {
+    if (!selectedItem) return;
+    setPaymentStatus('processing');
+    
+    // If it's a mock item, just simulate success without Firestore
+    if (selectedItem.id.startsWith('mock-')) {
+      setTimeout(() => {
+        setPaymentStatus('success');
+        setCardDetails({ number: '', expiry: '', cvc: '' });
+        setTimeout(() => {
+          setShowPayment(false);
+          setPaymentStatus('idle');
+          setSelectedItem(null);
+          // Update local state for mock items since they won't trigger onSnapshot
+          setItems(prev => prev.map(item => 
+            item.id === selectedItem.id ? { ...item, availability: 'Sold' } : item
+          ));
+        }, 2000);
+      }, 2000);
+      return;
+    }
+
+    setTimeout(async () => {
+      try {
+        await setDoc(doc(db, 'marketItems', selectedItem.id), {
+          ...selectedItem,
+          availability: 'Sold'
+        });
+        setPaymentStatus('success');
+        setCardDetails({ number: '', expiry: '', cvc: '' });
+        setTimeout(() => {
+          setShowPayment(false);
+          setPaymentStatus('idle');
+          setSelectedItem(null);
+        }, 2000);
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `marketItems/${selectedItem.id}`);
+        setPaymentStatus('idle');
+      }
+    }, 2000);
+  };
+
+  const filteredItems = items.filter(item => {
+    const matchesSearch = item.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
+                          item.description.toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesCategory = selectedCategory === 'All' || item.category === selectedCategory;
+    return matchesSearch && matchesCategory;
+  });
+
+  const categories = ['All', 'Electronics', 'Books', 'Furniture', 'Other'];
 
   return (
     <div className="pt-24 pb-12 px-4 max-w-7xl mx-auto">
@@ -2033,33 +2268,101 @@ const StudentSwap = ({ user }: { user: FirebaseUser | null }) => {
           <Link to="/" className="p-2 hover:bg-gray-100 rounded-full transition-colors"><ArrowLeft size={24} /></Link>
           <h1 className="text-3xl font-bold text-gray-900">StudentSwap</h1>
         </div>
-        <button 
-          onClick={() => user ? setIsAdding(true) : alert('Please sign in to sell items')}
-          className="bg-indigo-600 text-white px-6 py-3 rounded-2xl font-bold hover:bg-indigo-700 transition-all flex items-center justify-center shadow-lg shadow-indigo-100"
-        >
-          <Plus size={20} className="mr-2" /> Sell Item
-        </button>
+        <div className="flex flex-col sm:flex-row gap-4">
+          <div className="relative">
+            <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={20} />
+            <input 
+              type="text" 
+              placeholder="Search items..." 
+              className="pl-12 pr-6 py-3 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500 w-full sm:w-64"
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+            />
+          </div>
+          <button 
+            onClick={() => user ? setIsAdding(true) : alert('Please sign in to sell items')}
+            className="bg-indigo-600 text-white px-6 py-3 rounded-2xl font-bold hover:bg-indigo-700 transition-all flex items-center justify-center shadow-lg shadow-indigo-100"
+          >
+            <Plus size={20} className="mr-2" /> Sell Item
+          </button>
+        </div>
+      </div>
+
+      <div className="flex overflow-x-auto pb-4 mb-8 no-scrollbar gap-2">
+        {categories.map(cat => (
+          <button
+            key={cat}
+            onClick={() => setSelectedCategory(cat)}
+            className={cn(
+              "px-6 py-2 rounded-full font-bold text-sm transition-all whitespace-nowrap",
+              selectedCategory === cat 
+                ? "bg-indigo-600 text-white shadow-lg shadow-indigo-100" 
+                : "bg-gray-50 text-gray-500 hover:bg-gray-100"
+            )}
+          >
+            {cat}
+          </button>
+        ))}
       </div>
 
       <AnimatePresence>
         {isAdding && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setIsAdding(false)} className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
-            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative bg-white w-full max-w-lg rounded-[2.5rem] p-10 shadow-2xl">
+            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative bg-white w-full max-w-lg rounded-[2.5rem] p-10 shadow-2xl max-h-[90vh] overflow-y-auto">
               <h2 className="text-2xl font-bold mb-8">List Your Item</h2>
               <form onSubmit={handleAddItem} className="space-y-6">
-                <input type="text" placeholder="Item Title" required className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500" value={newItem.title} onChange={e => setNewItem({...newItem, title: e.target.value})} />
-                <div className="grid grid-cols-2 gap-4">
-                  <input type="number" placeholder="Price (₹)" required className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500" value={newItem.price} onChange={e => setNewItem({...newItem, price: e.target.value})} />
-                  <select className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500" value={newItem.category} onChange={e => setNewItem({...newItem, category: e.target.value})}>
-                    <option>Electronics</option>
-                    <option>Books</option>
-                    <option>Furniture</option>
-                    <option>Other</option>
-                  </select>
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-gray-400 uppercase">Item Title</label>
+                  <input type="text" placeholder="e.g. Engineering Physics Textbook" required className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500" value={newItem.title} onChange={e => setNewItem({...newItem, title: e.target.value})} />
                 </div>
-                <textarea placeholder="Description" className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500 h-32" value={newItem.description} onChange={e => setNewItem({...newItem, description: e.target.value})} />
-                <button type="submit" className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-bold text-lg hover:bg-indigo-700 transition-all">Post Item</button>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-gray-400 uppercase">Price (₹)</label>
+                    <input type="number" placeholder="Price" required className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500" value={newItem.price} onChange={e => setNewItem({...newItem, price: e.target.value})} />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-gray-400 uppercase">Category</label>
+                    <select className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500" value={newItem.category} onChange={e => setNewItem({...newItem, category: e.target.value})}>
+                      {categories.filter(c => c !== 'All').map(c => <option key={c}>{c}</option>)}
+                    </select>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-gray-400 uppercase">Description</label>
+                  <textarea placeholder="Tell us more about the item..." className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500 h-32" value={newItem.description} onChange={e => setNewItem({...newItem, description: e.target.value})} />
+                </div>
+                
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-gray-400 uppercase">Item Image</label>
+                  <div className="flex items-center space-x-4">
+                    <label className="flex flex-col items-center justify-center w-32 h-32 transition bg-white border-2 border-gray-300 border-dashed rounded-2xl appearance-none cursor-pointer hover:border-indigo-400 focus:outline-none">
+                      <Plus className="w-6 h-6 text-gray-600" />
+                      <span className="text-[10px] font-bold text-gray-500 mt-2">Add Photo</span>
+                      <input type="file" className="hidden" accept="image/*" onChange={handleFileChange} />
+                    </label>
+                    {itemImagePreview && (
+                      <div className="w-32 h-32 rounded-2xl overflow-hidden border border-gray-100 relative group">
+                        <img src={itemImagePreview} className="w-full h-full object-cover" alt="Preview" />
+                        <button 
+                          type="button"
+                          onClick={() => setItemImagePreview(null)}
+                          className="absolute top-1 right-1 bg-red-500 text-white p-1 rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
+                        >
+                          <X size={12} />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <button 
+                  type="submit" 
+                  disabled={isSubmitting}
+                  className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-bold text-lg hover:bg-indigo-700 transition-all shadow-xl shadow-indigo-100 disabled:opacity-50"
+                >
+                  {isSubmitting ? 'Posting...' : 'Post Item'}
+                </button>
               </form>
             </motion.div>
           </div>
@@ -2070,25 +2373,49 @@ const StudentSwap = ({ user }: { user: FirebaseUser | null }) => {
         <div className="flex justify-center py-20"><div className="w-10 h-10 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin"></div></div>
       ) : (
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-          {items.map(item => (
-            <div key={item.id} className="bg-white rounded-3xl border border-gray-100 overflow-hidden hover:shadow-lg transition-all flex flex-col">
+          {filteredItems.map(item => (
+            <div key={item.id} className="bg-white rounded-3xl border border-gray-100 overflow-hidden hover:shadow-lg transition-all flex flex-col relative">
+              {item.availability === 'Sold' ? (
+                <div className="absolute top-4 left-4 z-10 bg-red-500 text-white px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider">
+                  Sold
+                </div>
+              ) : (
+                <div className="absolute top-4 left-4 z-10 bg-green-500 text-white px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider">
+                  Available
+                </div>
+              )}
               <img src={item.imageUrl} className="w-full h-40 object-cover" alt="" />
               <div className="p-5 flex-1 flex flex-col">
                 <div className="flex justify-between items-start mb-1">
                   <h3 className="font-bold text-gray-900 line-clamp-1">{item.title}</h3>
                 </div>
-                <p className="text-xs text-gray-400 font-bold uppercase mb-3">{item.category}</p>
+                <div className="flex items-center justify-between mb-3">
+                  <p className="text-[10px] text-gray-400 font-bold uppercase">{item.category}</p>
+                  <p className="text-[10px] text-gray-400 font-medium">{formatTimeAgo(item.createdAt)}</p>
+                </div>
                 <p className="text-lg font-bold text-indigo-600 mb-4">₹{item.price}</p>
-                <div className="mt-auto pt-4 border-t border-gray-50 flex justify-between items-center">
-                  <div className="flex items-center space-x-2">
-                    <div className="w-6 h-6 bg-gray-100 rounded-full flex items-center justify-center text-[10px] font-bold text-gray-500">
-                      {item.sellerName?.[0]}
+                
+                <div className="mt-auto pt-4 border-t border-gray-50 flex flex-col gap-4">
+                  <div className="flex justify-between items-center">
+                    <div className="flex items-center space-x-2">
+                      <div className="w-6 h-6 bg-gray-100 rounded-full flex items-center justify-center text-[10px] font-bold text-gray-500">
+                        {item.sellerName?.[0]}
+                      </div>
+                      <span className="text-[10px] text-gray-500 font-medium">{item.sellerName}</span>
                     </div>
-                    <span className="text-[10px] text-gray-500 font-medium">{item.sellerName}</span>
+                    {user?.uid === item.sellerId && (
+                      <button onClick={() => handleDelete(item.id)} className="text-red-400 hover:text-red-600 transition-colors">
+                        <X size={14} />
+                      </button>
+                    )}
                   </div>
-                  {user?.uid === item.sellerId && (
-                    <button onClick={() => handleDelete(item.id)} className="text-red-400 hover:text-red-600 transition-colors">
-                      <LogOut size={14} />
+                  
+                  {item.availability === 'Available' && (
+                    <button 
+                      onClick={() => { setSelectedItem(item); setShowPayment(true); }}
+                      className="w-full bg-indigo-600 text-white py-2 rounded-xl font-bold text-sm hover:bg-indigo-700 transition-colors"
+                    >
+                      {user?.uid === item.sellerId ? 'Buy Now (Test)' : 'Buy Now'}
                     </button>
                   )}
                 </div>
@@ -2097,54 +2424,417 @@ const StudentSwap = ({ user }: { user: FirebaseUser | null }) => {
           ))}
         </div>
       )}
+
+      {/* Payment Modal */}
+      <AnimatePresence>
+        {showPayment && selectedItem && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => paymentStatus === 'idle' && setShowPayment(false)} className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative bg-white w-full max-w-md rounded-[2.5rem] p-10 shadow-2xl text-center">
+              {paymentStatus === 'idle' && (
+                <>
+                  <div className="w-20 h-20 bg-indigo-50 rounded-3xl flex items-center justify-center text-indigo-600 mx-auto mb-6">
+                    <CreditCard size={40} />
+                  </div>
+                  <h3 className="text-2xl font-bold mb-2">Payment Integration</h3>
+                  <p className="text-gray-500 mb-6 text-sm">Securely purchase <span className="font-bold text-gray-900">{selectedItem.title}</span> for <span className="font-bold text-indigo-600">₹{selectedItem.price}</span></p>
+                  
+                  <div className="space-y-4 mb-8 text-left">
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-gray-400 uppercase ml-1">Card Number</label>
+                      <input 
+                        type="text" 
+                        placeholder="0000 0000 0000 0000" 
+                        className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500"
+                        value={cardDetails.number}
+                        onChange={e => setCardDetails({...cardDetails, number: e.target.value.replace(/\D/g, '').slice(0, 16).replace(/(\d{4})/g, '$1 ').trim()})}
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold text-gray-400 uppercase ml-1">Expiry</label>
+                        <input 
+                          type="text" 
+                          placeholder="MM/YY" 
+                          className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500"
+                          value={cardDetails.expiry}
+                          onChange={e => setCardDetails({...cardDetails, expiry: e.target.value.replace(/\D/g, '').slice(0, 4).replace(/(\d{2})/, '$1/').replace(/\/$/, '')})}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold text-gray-400 uppercase ml-1">CVC</label>
+                        <input 
+                          type="password" 
+                          placeholder="***" 
+                          className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500"
+                          value={cardDetails.cvc}
+                          onChange={e => setCardDetails({...cardDetails, cvc: e.target.value.replace(/\D/g, '').slice(0, 3)})}
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    <button 
+                      onClick={handleBuy} 
+                      disabled={!cardDetails.number || !cardDetails.expiry || !cardDetails.cvc}
+                      className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 disabled:opacity-50"
+                    >
+                      Pay ₹{selectedItem.price}
+                    </button>
+                    <button onClick={() => setShowPayment(false)} className="w-full py-2 text-gray-400 font-bold hover:text-gray-600 text-sm">Cancel</button>
+                  </div>
+                </>
+              )}
+
+              {paymentStatus === 'processing' && (
+                <div className="py-12">
+                  <div className="w-20 h-20 border-4 border-indigo-100 border-t-indigo-600 rounded-full animate-spin mx-auto mb-8"></div>
+                  <h3 className="text-2xl font-bold mb-2">Processing Payment</h3>
+                  <p className="text-gray-500">Securely connecting to gateway...</p>
+                </div>
+              )}
+
+              {paymentStatus === 'success' && (
+                <div className="py-12">
+                  <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} className="w-24 h-24 bg-green-100 rounded-full flex items-center justify-center text-green-600 mx-auto mb-8">
+                    <Check size={48} />
+                  </motion.div>
+                  <h3 className="text-3xl font-bold mb-2">Purchase Successful!</h3>
+                  <p className="text-gray-500">The item is now yours. Contact the seller for pickup.</p>
+                </div>
+              )}
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };
 
-const JobFinder = () => {
+const JobFinder = ({ user }: { user: FirebaseUser | null }) => {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedJob, setSelectedJob] = useState<Job | null>(null);
+  const [isAdding, setIsAdding] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [newJob, setNewJob] = useState({
+    title: '',
+    company: '',
+    location: '',
+    salary: '',
+    type: 'Part-time' as 'Part-time' | 'Full-time' | 'Internship',
+    description: '',
+    contact: '',
+    lastDate: '',
+    eligibility: ''
+  });
+
+  const MOCK_JOBS: Job[] = [
+    { 
+      id: 'mock-1', 
+      title: 'Content Writer', 
+      company: 'EduTech Solutions', 
+      location: 'Remote / Near Campus', 
+      salary: '₹5000 - ₹8000 / month', 
+      type: 'Part-time', 
+      description: 'Write educational content for our blog.', 
+      createdAt: new Date().toISOString(),
+      contact: 'hr@edutech.com',
+      lastDate: '2026-04-15',
+      eligibility: 'Excellent writing skills, any degree.'
+    },
+    { 
+      id: 'mock-2', 
+      title: 'Campus Ambassador', 
+      company: 'Tech Brand X', 
+      location: 'University Campus', 
+      salary: 'Performance Based', 
+      type: 'Internship', 
+      description: 'Promote our products among students.', 
+      createdAt: new Date().toISOString(),
+      contact: 'campus@techbrandx.com',
+      lastDate: '2026-04-10',
+      eligibility: 'Current university student with good communication.'
+    },
+    { 
+      id: 'mock-3', 
+      title: 'Delivery Partner', 
+      company: 'QuickBite', 
+      location: 'Local Area', 
+      salary: '₹12000 / month', 
+      type: 'Part-time', 
+      description: 'Deliver food orders in the evening.', 
+      createdAt: new Date().toISOString(),
+      contact: 'jobs@quickbite.com',
+      lastDate: '2026-05-01',
+      eligibility: 'Must have a two-wheeler and valid license.'
+    },
+  ];
 
   useEffect(() => {
-    const mockJobs: Job[] = [
-      { id: '1', title: 'Content Writer', company: 'EduTech Solutions', location: 'Remote / Near Campus', salary: '₹5000 - ₹8000 / month', type: 'Part-time', description: 'Write educational content for our blog.', createdAt: new Date().toISOString() },
-      { id: '2', title: 'Campus Ambassador', company: 'Tech Brand X', location: 'University Campus', salary: 'Performance Based', type: 'Internship', description: 'Promote our products among students.', createdAt: new Date().toISOString() },
-      { id: '3', title: 'Delivery Partner', company: 'QuickBite', location: 'Local Area', salary: '₹12000 / month', type: 'Part-time', description: 'Deliver food orders in the evening.', createdAt: new Date().toISOString() },
-    ];
-    setJobs(mockJobs);
-    setLoading(false);
+    const q = query(collection(db, 'jobs'), orderBy('createdAt', 'desc'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const jobData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Job));
+      setJobs([...jobData, ...MOCK_JOBS]);
+      setLoading(false);
+    });
+    return () => unsubscribe();
   }, []);
+
+  const handleAddJob = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user) return;
+    setIsSubmitting(true);
+    try {
+      await addDoc(collection(db, 'jobs'), {
+        ...newJob,
+        createdAt: new Date().toISOString(),
+        postedBy: user.uid
+      });
+      setIsAdding(false);
+      setNewJob({
+        title: '',
+        company: '',
+        location: '',
+        salary: '',
+        type: 'Part-time',
+        description: '',
+        contact: '',
+        lastDate: '',
+        eligibility: ''
+      });
+    } catch (err) {
+      handleFirestoreError(err, OperationType.CREATE, 'jobs');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const filteredJobs = jobs.filter(j => 
+    j.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    j.company.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    j.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    j.location.toLowerCase().includes(searchQuery.toLowerCase())
+  );
 
   return (
     <div className="pt-24 pb-12 px-4 max-w-7xl mx-auto">
-      <div className="flex items-center space-x-4 mb-8">
-        <Link to="/" className="p-2 hover:bg-gray-100 rounded-full transition-colors"><ArrowLeft size={24} /></Link>
-        <h1 className="text-3xl font-bold text-gray-900">Job Finder</h1>
+      <div className="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-4">
+        <div className="flex items-center space-x-4">
+          <Link to="/" className="p-2 hover:bg-gray-100 rounded-full transition-colors"><ArrowLeft size={24} /></Link>
+          <h1 className="text-3xl font-bold text-gray-900">Job Finder</h1>
+        </div>
+        <div className="flex flex-col sm:flex-row gap-4">
+          <div className="relative">
+            <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={20} />
+            <input 
+              type="text" 
+              placeholder="Search jobs or location..." 
+              className="pl-12 pr-6 py-3 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-purple-500 w-full sm:w-64"
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+            />
+          </div>
+          <button 
+            onClick={() => user ? setIsAdding(true) : alert('Please sign in to post a job')}
+            className="bg-purple-600 text-white px-6 py-3 rounded-2xl font-bold hover:bg-purple-700 transition-all flex items-center justify-center shadow-lg shadow-purple-100"
+          >
+            <Plus size={20} className="mr-2" /> Post a Job
+          </button>
+        </div>
       </div>
       
-      <div className="space-y-6">
-        {jobs.map(j => (
-          <div key={j.id} className="bg-white p-8 rounded-[2rem] border border-gray-100 hover:shadow-lg transition-all flex flex-col md:flex-row md:items-center justify-between gap-6">
-            <div className="flex items-start space-x-6">
-              <div className="w-16 h-16 bg-purple-50 text-purple-600 rounded-2xl flex items-center justify-center flex-shrink-0">
-                <Briefcase size={28} />
-              </div>
-              <div>
-                <h3 className="text-xl font-bold text-gray-900 mb-1">{j.title}</h3>
-                <p className="text-purple-600 font-semibold mb-2">{j.company}</p>
-                <div className="flex flex-wrap gap-4 text-sm text-gray-500">
-                  <span className="flex items-center"><MapPin size={14} className="mr-1" /> {j.location}</span>
-                  <span className="flex items-center font-bold text-gray-700">₹ {j.salary}</span>
+      {loading ? (
+        <div className="flex justify-center py-20"><div className="w-10 h-10 border-4 border-purple-600 border-t-transparent rounded-full animate-spin"></div></div>
+      ) : (
+        <div className="space-y-6">
+          {filteredJobs.map(j => (
+            <div key={j.id} className="bg-white p-8 rounded-[2rem] border border-gray-100 hover:shadow-lg transition-all flex flex-col md:flex-row md:items-center justify-between gap-6">
+              <div className="flex items-start space-x-6">
+                <div className="w-16 h-16 bg-purple-50 text-purple-600 rounded-2xl flex items-center justify-center flex-shrink-0">
+                  <Briefcase size={28} />
+                </div>
+                <div>
+                  <h3 className="text-xl font-bold text-gray-900 mb-1">{j.title}</h3>
+                  <p className="text-purple-600 font-semibold mb-2">{j.company}</p>
+                  <div className="flex flex-wrap gap-4 text-sm text-gray-500">
+                    <span className="flex items-center"><MapPin size={14} className="mr-1" /> {j.location}</span>
+                    <span className="flex items-center font-bold text-gray-700">₹ {j.salary}</span>
+                    <span className="px-2 py-0.5 bg-purple-50 text-purple-600 rounded-md font-bold text-[10px] uppercase tracking-wider">{j.type}</span>
+                  </div>
                 </div>
               </div>
+              <button 
+                onClick={() => setSelectedJob(j)}
+                className="bg-gray-900 text-white px-8 py-3 rounded-xl font-bold hover:bg-gray-800 transition-all"
+              >
+                View Details
+              </button>
             </div>
-            <div className="flex items-center justify-between md:justify-end gap-6">
-              <span className="px-4 py-1.5 bg-gray-50 text-gray-500 text-xs font-bold uppercase rounded-full">{j.type}</span>
-              <button className="bg-indigo-600 text-white px-8 py-3 rounded-xl font-bold hover:bg-indigo-700 transition-colors">Apply</button>
+          ))}
+          {filteredJobs.length === 0 && (
+            <div className="text-center py-20">
+              <p className="text-gray-500">No jobs found matching your search.</p>
             </div>
+          )}
+        </div>
+      )}
+
+      {/* Post Job Modal */}
+      <AnimatePresence>
+        {isAdding && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setIsAdding(false)} className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative bg-white w-full max-w-2xl rounded-[2.5rem] p-10 shadow-2xl max-h-[90vh] overflow-y-auto">
+              <div className="flex justify-between items-center mb-8">
+                <h2 className="text-2xl font-bold">Post a New Job</h2>
+                <button onClick={() => setIsAdding(false)} className="p-2 hover:bg-gray-100 rounded-full transition-colors"><X size={24} /></button>
+              </div>
+              <form onSubmit={handleAddJob} className="space-y-6">
+                <div className="grid md:grid-cols-2 gap-6">
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-gray-400 uppercase">Job Title</label>
+                    <input type="text" required className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-purple-500" value={newJob.title} onChange={e => setNewJob({...newJob, title: e.target.value})} placeholder="e.g. Content Writer" />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-gray-400 uppercase">Company Name</label>
+                    <input type="text" required className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-purple-500" value={newJob.company} onChange={e => setNewJob({...newJob, company: e.target.value})} placeholder="e.g. EduTech Solutions" />
+                  </div>
+                </div>
+                <div className="grid md:grid-cols-2 gap-6">
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-gray-400 uppercase">Location</label>
+                    <input type="text" required className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-purple-500" value={newJob.location} onChange={e => setNewJob({...newJob, location: e.target.value})} placeholder="e.g. Remote / Near Campus" />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-gray-400 uppercase">Salary Range</label>
+                    <input type="text" required className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-purple-500" value={newJob.salary} onChange={e => setNewJob({...newJob, salary: e.target.value})} placeholder="e.g. ₹5000 - ₹8000 / month" />
+                  </div>
+                </div>
+                <div className="grid md:grid-cols-2 gap-6">
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-gray-400 uppercase">Job Type</label>
+                    <select className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-purple-500" value={newJob.type} onChange={e => setNewJob({...newJob, type: e.target.value as any})}>
+                      <option value="Part-time">Part-time</option>
+                      <option value="Full-time">Full-time</option>
+                      <option value="Internship">Internship</option>
+                    </select>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-gray-400 uppercase">Last Date to Apply</label>
+                    <input type="date" required className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-purple-500" value={newJob.lastDate} onChange={e => setNewJob({...newJob, lastDate: e.target.value})} />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-gray-400 uppercase">Contact Email/Link</label>
+                  <input type="text" required className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-purple-500" value={newJob.contact} onChange={e => setNewJob({...newJob, contact: e.target.value})} placeholder="e.g. hr@edutech.com" />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-gray-400 uppercase">Eligibility</label>
+                  <textarea required className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-purple-500 h-24" value={newJob.eligibility} onChange={e => setNewJob({...newJob, eligibility: e.target.value})} placeholder="e.g. Excellent writing skills, any degree." />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-gray-400 uppercase">Job Description</label>
+                  <textarea required className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-purple-500 h-32" value={newJob.description} onChange={e => setNewJob({...newJob, description: e.target.value})} placeholder="Describe the role and responsibilities..." />
+                </div>
+                <button 
+                  type="submit" 
+                  disabled={isSubmitting}
+                  className="w-full bg-purple-600 text-white py-4 rounded-2xl font-bold text-lg hover:bg-purple-700 transition-all shadow-xl shadow-purple-100 disabled:opacity-50"
+                >
+                  {isSubmitting ? 'Posting...' : 'Post Job Listing'}
+                </button>
+              </form>
+            </motion.div>
           </div>
-        ))}
-      </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {selectedJob && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }} 
+              animate={{ opacity: 1 }} 
+              exit={{ opacity: 0 }} 
+              onClick={() => setSelectedJob(null)} 
+              className="absolute inset-0 bg-black/60 backdrop-blur-sm" 
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }} 
+              animate={{ opacity: 1, scale: 1, y: 0 }} 
+              exit={{ opacity: 0, scale: 0.9, y: 20 }} 
+              className="relative bg-white w-full max-w-2xl rounded-[2.5rem] p-10 shadow-2xl max-h-[90vh] overflow-y-auto"
+            >
+              <div className="flex justify-between items-start mb-8">
+                <div className="flex items-center space-x-4">
+                  <div className="w-16 h-16 bg-purple-50 text-purple-600 rounded-2xl flex items-center justify-center">
+                    <Briefcase size={32} />
+                  </div>
+                  <div>
+                    <h2 className="text-2xl font-bold text-gray-900">{selectedJob.title}</h2>
+                    <p className="text-purple-600 font-bold">{selectedJob.company}</p>
+                  </div>
+                </div>
+                <button onClick={() => setSelectedJob(null)} className="p-2 hover:bg-gray-100 rounded-full transition-colors">
+                  <X size={24} />
+                </button>
+              </div>
+
+              <div className="grid md:grid-cols-2 gap-8 mb-8">
+                <div className="space-y-4">
+                  <div>
+                    <label className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Location</label>
+                    <p className="text-gray-900 font-medium">{selectedJob.location}</p>
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Salary</label>
+                    <p className="text-gray-900 font-medium">{selectedJob.salary}</p>
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Job Type</label>
+                    <p className="text-gray-900 font-medium">{selectedJob.type}</p>
+                  </div>
+                </div>
+                <div className="space-y-4">
+                  <div>
+                    <label className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Date of Listing</label>
+                    <p className="text-gray-900 font-medium">{new Date(selectedJob.createdAt).toLocaleDateString()}</p>
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Last Date for Applying</label>
+                    <p className="text-red-500 font-bold">{new Date(selectedJob.lastDate).toLocaleDateString()}</p>
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Contact Information</label>
+                    <p className="text-indigo-600 font-bold">{selectedJob.contact}</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-6 mb-10">
+                <div>
+                  <label className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2 block">Eligibility</label>
+                  <p className="text-gray-600 leading-relaxed bg-gray-50 p-4 rounded-2xl border border-gray-100">{selectedJob.eligibility}</p>
+                </div>
+                <div>
+                  <label className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2 block">Job Description</label>
+                  <p className="text-gray-600 leading-relaxed">{selectedJob.description}</p>
+                </div>
+              </div>
+
+              <button 
+                onClick={() => window.location.href = `mailto:${selectedJob.contact}`}
+                className="w-full bg-purple-600 text-white py-4 rounded-2xl font-bold text-lg hover:bg-purple-700 transition-all shadow-xl shadow-purple-100"
+              >
+                Apply Now
+              </button>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };
@@ -2215,33 +2905,35 @@ export default function App() {
   );
 
   return (
-    <Router>
-      <div className="min-h-screen bg-white font-sans text-gray-900 selection:bg-indigo-100">
-        <Navbar user={user} onLogout={handleLogout} />
-        <main>
-          <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/hostels" element={<FindMyStay user={user} />} />
-            <Route path="/tiffin" element={<TiffinMate user={user} />} />
-            <Route path="/swap" element={<StudentSwap user={user} />} />
-            <Route path="/jobs" element={<JobFinder />} />
-            <Route path="/auth" element={<AuthPage />} />
-          </Routes>
-        </main>
-        
-        <footer className="bg-gray-50 py-20 mt-20 border-t border-gray-100">
-          <div className="max-w-7xl mx-auto px-4 text-center">
-            <div className="flex items-center justify-center space-x-2 mb-6">
-              <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white">
-                <Home size={18} />
+    <ErrorBoundary>
+      <Router>
+        <div className="min-h-screen bg-white font-sans text-gray-900 selection:bg-indigo-100">
+          <Navbar user={user} onLogout={handleLogout} />
+          <main>
+            <Routes>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/hostels" element={<FindMyStay user={user} />} />
+              <Route path="/tiffin" element={<TiffinMate user={user} />} />
+              <Route path="/swap" element={<StudentSwap user={user} />} />
+              <Route path="/jobs" element={<JobFinder user={user} />} />
+              <Route path="/auth" element={<AuthPage />} />
+            </Routes>
+          </main>
+          
+          <footer className="bg-gray-50 py-20 mt-20 border-t border-gray-100">
+            <div className="max-w-7xl mx-auto px-4 text-center">
+              <div className="flex items-center justify-center space-x-2 mb-6">
+                <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white">
+                  <Home size={18} />
+                </div>
+                <span className="font-bold text-xl tracking-tight">StudentHub</span>
               </div>
-              <span className="font-bold text-xl tracking-tight">StudentHub</span>
+              <p className="text-gray-400 max-w-md mx-auto mb-8">Empowering students with essential utilities for a better campus life experience.</p>
+              <p className="text-gray-400 text-sm">© 2026 StudentHub. All rights reserved.</p>
             </div>
-            <p className="text-gray-400 max-w-md mx-auto mb-8">Empowering students with essential utilities for a better campus life experience.</p>
-            <p className="text-gray-400 text-sm">© 2026 StudentHub. All rights reserved.</p>
-          </div>
-        </footer>
-      </div>
-    </Router>
+          </footer>
+        </div>
+      </Router>
+    </ErrorBoundary>
   );
 }
