@@ -1,7 +1,7 @@
 import React, { useState, useEffect, Component } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useNavigate, useParams } from 'react-router-dom';
+import { FirebaseError } from 'firebase/app';
 import { 
-  Home, 
   MapPin, 
   Utensils, 
   ShoppingBag, 
@@ -20,7 +20,11 @@ import {
   AlertCircle,
   Check,
   X,
-  CreditCard
+  CreditCard,
+  MessageCircle,
+  Send,
+  Moon,
+  Sun
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -46,11 +50,99 @@ import {
 import { auth, db } from './firebase';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import logo from './logo.jpeg';
 
 // --- Utilities ---
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
+
+type ServiceType = 'hostels' | 'tiffin' | 'swap' | 'jobs';
+type ChatMessage = { from: 'user' | 'bot'; text: string };
+
+const SERVICE_CHAT_HINTS: Record<ServiceType, string[]> = {
+  hostels: ['cheap hostel', 'AC room', 'single room', 'how to contact owner'],
+  tiffin: ['monthly plan', 'veg menu', 'delivery time', 'best rated service'],
+  swap: ['books under 500', 'electronics', 'how to buy', 'available items'],
+  jobs: ['part-time jobs', 'internship', 'remote job', 'how to apply'],
+};
+
+const ServiceChatbot = ({ service }: { service: ServiceType }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [input, setInput] = useState('');
+  const [messages, setMessages] = useState<ChatMessage[]>([
+    { from: 'bot', text: `Hi! I can help with ${service}. Ask me anything.` }
+  ]);
+
+  const getBotReply = (text: string) => {
+    const query = text.toLowerCase();
+    if (service === 'hostels') {
+      if (query.includes('cheap') || query.includes('budget')) return 'Use search and sort by lower price. Check listings around local campus areas for budget-friendly options.';
+      if (query.includes('ac')) return 'Use the AC filter at the top to view only AC hostels.';
+      if (query.includes('contact')) return 'Open any hostel card and use the contact details shown in the listing.';
+    }
+    if (service === 'tiffin') {
+      if (query.includes('monthly')) return 'Open a service card and click Subscribe to compare weekly and monthly plans.';
+      if (query.includes('menu')) return 'Click "View Full Menu" on any tiffin service to check day-wise meals.';
+      if (query.includes('review')) return 'Use the Reviews button on service cards to read feedback before subscribing.';
+    }
+    if (service === 'swap') {
+      if (query.includes('buy')) return 'Open an item and click Buy Now, then complete the test payment form.';
+      if (query.includes('sell') || query.includes('list')) return 'Use "Sell Item" to post your item with title, category, price, and image.';
+      if (query.includes('available')) return 'Available items have a Buy Now button and an "Available" badge.';
+    }
+    if (service === 'jobs') {
+      if (query.includes('apply')) return 'Open job details and click Apply Now to contact the recruiter.';
+      if (query.includes('post')) return 'Use "Post a Job" to submit role details, salary, and eligibility.';
+      if (query.includes('intern')) return 'Search with the keyword "internship" to find internship postings quickly.';
+    }
+    return `Try asking about: ${SERVICE_CHAT_HINTS[service].join(', ')}.`;
+  };
+
+  const handleSend = () => {
+    const text = input.trim();
+    if (!text) return;
+    const reply = getBotReply(text);
+    setMessages(prev => [...prev, { from: 'user', text }, { from: 'bot', text: reply }]);
+    setInput('');
+  };
+
+  return (
+    <div className="fixed bottom-6 right-6 z-[120]">
+      {isOpen && (
+        <div className="w-80 bg-white border border-gray-200 rounded-2xl shadow-2xl overflow-hidden mb-3">
+          <div className="px-4 py-3 bg-indigo-600 text-white font-semibold">Student Solution Assistant</div>
+          <div className="h-72 overflow-y-auto p-3 space-y-2 bg-gray-50">
+            {messages.map((m, idx) => (
+              <div key={idx} className={cn('max-w-[85%] text-sm px-3 py-2 rounded-xl', m.from === 'user' ? 'ml-auto bg-indigo-600 text-white' : 'bg-white border border-gray-200 text-gray-700')}>
+                {m.text}
+              </div>
+            ))}
+          </div>
+          <div className="p-3 border-t border-gray-100 flex items-center gap-2">
+            <input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+              placeholder="Type your question..."
+              className="flex-1 px-3 py-2 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-400 text-sm"
+            />
+            <button onClick={handleSend} className="p-2 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-colors" aria-label="Send message">
+              <Send size={16} />
+            </button>
+          </div>
+        </div>
+      )}
+      <button
+        onClick={() => setIsOpen(prev => !prev)}
+        className="w-14 h-14 rounded-full bg-indigo-600 text-white shadow-xl hover:bg-indigo-700 transition-colors flex items-center justify-center"
+        aria-label="Open assistant chat"
+      >
+        <MessageCircle size={24} />
+      </button>
+    </div>
+  );
+};
 
 enum OperationType {
   CREATE = 'create',
@@ -256,18 +348,24 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
   }
 }
 
-const Navbar = ({ user, onLogout }: { user: FirebaseUser | null, onLogout: () => void }) => {
+const Navbar = ({ user, onLogout, isDarkMode, onToggleDarkMode }: { user: FirebaseUser | null, onLogout: () => void, isDarkMode: boolean, onToggleDarkMode: () => void }) => {
   return (
     <nav className="fixed top-0 left-0 right-0 z-50 bg-white border-b border-gray-100 h-16 flex items-center px-4 md:px-8">
       <div className="max-w-7xl mx-auto w-full flex justify-between items-center">
         <Link to="/" className="flex items-center space-x-2">
-          <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white">
-            <Home size={18} />
-          </div>
-          <span className="font-bold text-xl tracking-tight text-gray-900">StudentHub</span>
+          <img src={logo} className="w-8 h-8 rounded-lg" alt="Student Solution logo" />
+          <span className="font-bold text-xl tracking-tight text-gray-900">Student Solution</span>
         </Link>
         
         <div className="flex items-center space-x-6">
+          <button
+            onClick={onToggleDarkMode}
+            className="p-2 rounded-xl bg-gray-50 border border-gray-100 text-gray-600 hover:text-indigo-600 transition-colors"
+            aria-label={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+            title={isDarkMode ? 'Light mode' : 'Dark mode'}
+          >
+            {isDarkMode ? <Sun size={18} /> : <Moon size={18} />}
+          </button>
           <Link to="/hostels" className="text-gray-600 hover:text-indigo-600 font-medium hidden md:block">Hostels</Link>
           <Link to="/tiffin" className="text-gray-600 hover:text-indigo-600 font-medium hidden md:block">Tiffin</Link>
           <Link to="/swap" className="text-gray-600 hover:text-indigo-600 font-medium hidden md:block">Market</Link>
@@ -299,7 +397,7 @@ const Dashboard = () => {
   return (
     <div className="pt-24 pb-12 px-4 max-w-7xl mx-auto">
       <div className="mb-12">
-        <h1 className="text-4xl font-bold text-gray-900 mb-2">Student Hub</h1>
+        <h1 className="text-4xl font-bold text-gray-900 mb-2">Student Solution</h1>
         <p className="text-gray-500 text-lg">Your one-stop destination for all campus essentials.</p>
       </div>
       
@@ -1301,6 +1399,7 @@ const FindMyStay = ({ user }: { user: FirebaseUser | null }) => {
           </div>
         )}
       </AnimatePresence>
+      <ServiceChatbot service="hostels" />
     </div>
   );
 };
@@ -2097,6 +2196,7 @@ const TiffinMate = ({ user }: { user: FirebaseUser | null }) => {
           </div>
         )}
       </AnimatePresence>
+      <ServiceChatbot service="tiffin" />
     </div>
   );
 };
@@ -2508,6 +2608,7 @@ const StudentSwap = ({ user }: { user: FirebaseUser | null }) => {
           </div>
         )}
       </AnimatePresence>
+      <ServiceChatbot service="swap" />
     </div>
   );
 };
@@ -2835,17 +2936,23 @@ const JobFinder = ({ user }: { user: FirebaseUser | null }) => {
           </div>
         )}
       </AnimatePresence>
+      <ServiceChatbot service="jobs" />
     </div>
   );
 };
 
 const AuthPage = () => {
   const navigate = useNavigate();
+  const [authError, setAuthError] = useState<string | null>(null);
   const handleLogin = async () => {
+    setAuthError(null);
     const provider = new GoogleAuthProvider();
     try {
       const result = await signInWithPopup(auth, provider);
       const user = result.user;
+      navigate('/');
+
+      // Firestore profile creation should not block a successful sign-in.
       const userRef = doc(db, 'users', user.uid);
       const userSnap = await getDoc(userRef);
       if (!userSnap.exists()) {
@@ -2857,20 +2964,40 @@ const AuthPage = () => {
           createdAt: new Date().toISOString()
         });
       }
-      navigate('/');
     } catch (err) {
       console.error(err);
+      if (err instanceof FirebaseError) {
+        switch (err.code) {
+          case 'auth/unauthorized-domain':
+            setAuthError('This domain is not authorized for Google sign-in. Open app on localhost or add this domain in Firebase Authorized domains.');
+            break;
+          case 'auth/popup-closed-by-user':
+            setAuthError('Sign-in popup was closed before completing login. Please try again.');
+            break;
+          case 'auth/popup-blocked':
+            setAuthError('Popup blocked by browser. Allow popups for this site and try again.');
+            break;
+          case 'auth/cancelled-popup-request':
+            setAuthError('Multiple sign-in attempts detected. Please click sign-in once and wait.');
+            break;
+          default:
+            setAuthError(`Sign in failed (${err.code}).`);
+        }
+      } else {
+        setAuthError('Sign in failed. Please try again.');
+      }
     }
   };
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
       <div className="max-w-md w-full bg-white p-12 rounded-[3rem] shadow-2xl text-center border border-gray-100">
-        <div className="w-20 h-20 bg-indigo-600 rounded-3xl flex items-center justify-center text-white mx-auto mb-10">
-          <Home size={40} />
-        </div>
-        <h1 className="text-3xl font-bold mb-4">Welcome to StudentHub</h1>
+        <img src={logo} className="w-20 h-20 rounded-3xl mx-auto mb-10" alt="Student Solution logo" />
+        <h1 className="text-3xl font-bold mb-4">Welcome to Student Solution</h1>
         <p className="text-gray-500 mb-12">Sign in to access all student utilities and connect with your community.</p>
+        {authError && (
+          <p className="text-sm text-red-600 mb-4">{authError}</p>
+        )}
         <button onClick={handleLogin} className="w-full flex items-center justify-center space-x-4 bg-white border-2 border-gray-100 py-4 rounded-2xl font-bold hover:border-indigo-600 transition-all">
           <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" className="w-6 h-6" alt="" />
           <span>Continue with Google</span>
@@ -2885,6 +3012,7 @@ const AuthPage = () => {
 export default function App() {
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isDarkMode, setIsDarkMode] = useState(false);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (u) => {
@@ -2898,6 +3026,19 @@ export default function App() {
     await signOut(auth);
   };
 
+  useEffect(() => {
+    const savedTheme = localStorage.getItem('student-solution-theme');
+    if (savedTheme) {
+      setIsDarkMode(savedTheme === 'dark');
+      return;
+    }
+    setIsDarkMode(window.matchMedia('(prefers-color-scheme: dark)').matches);
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('student-solution-theme', isDarkMode ? 'dark' : 'light');
+  }, [isDarkMode]);
+
   if (loading) return (
     <div className="min-h-screen flex items-center justify-center bg-white">
       <div className="w-12 h-12 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>
@@ -2907,8 +3048,8 @@ export default function App() {
   return (
     <ErrorBoundary>
       <Router>
-        <div className="min-h-screen bg-white font-sans text-gray-900 selection:bg-indigo-100">
-          <Navbar user={user} onLogout={handleLogout} />
+        <div className={cn("min-h-screen bg-white font-sans text-gray-900 selection:bg-indigo-100", isDarkMode && "theme-night")}>
+          <Navbar user={user} onLogout={handleLogout} isDarkMode={isDarkMode} onToggleDarkMode={() => setIsDarkMode(prev => !prev)} />
           <main>
             <Routes>
               <Route path="/" element={<Dashboard />} />
@@ -2923,13 +3064,11 @@ export default function App() {
           <footer className="bg-gray-50 py-20 mt-20 border-t border-gray-100">
             <div className="max-w-7xl mx-auto px-4 text-center">
               <div className="flex items-center justify-center space-x-2 mb-6">
-                <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white">
-                  <Home size={18} />
-                </div>
-                <span className="font-bold text-xl tracking-tight">StudentHub</span>
+                <img src={logo} className="w-8 h-8 rounded-lg" alt="Student Solution logo" />
+                <span className="font-bold text-xl tracking-tight">Student Solution</span>
               </div>
               <p className="text-gray-400 max-w-md mx-auto mb-8">Empowering students with essential utilities for a better campus life experience.</p>
-              <p className="text-gray-400 text-sm">© 2026 StudentHub. All rights reserved.</p>
+              <p className="text-gray-400 text-sm">© 2026 Student Solution. All rights reserved.</p>
             </div>
           </footer>
         </div>

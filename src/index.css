@@ -10,3 +10,50 @@
     @apply font-sans antialiased;
   }
 }
+
+/* Global night mode overrides for utility-heavy UI */
+.theme-night {
+  background-color: #0b1020 !important;
+  color: #e5e7eb !important;
+}
+
+.theme-night .bg-white {
+  background-color: #111827 !important;
+}
+
+.theme-night .bg-gray-50 {
+  background-color: #0f172a !important;
+}
+
+.theme-night .bg-gray-900 {
+  background-color: #030712 !important;
+}
+
+.theme-night .text-gray-900 {
+  color: #f3f4f6 !important;
+}
+
+.theme-night .text-gray-700,
+.theme-night .text-gray-600,
+.theme-night .text-gray-500,
+.theme-night .text-gray-400 {
+  color: #cbd5e1 !important;
+}
+
+.theme-night .border-gray-100,
+.theme-night .border-gray-200 {
+  border-color: #334155 !important;
+}
+
+.theme-night input,
+.theme-night textarea,
+.theme-night select {
+  background-color: #0f172a !important;
+  color: #e5e7eb !important;
+  border-color: #334155 !important;
+}
+
+.theme-night input::placeholder,
+.theme-night textarea::placeholder {
+  color: #94a3b8 !important;
+}
