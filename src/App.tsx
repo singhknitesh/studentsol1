@@ -144,6 +144,27 @@ const ServiceChatbot = ({ service }: { service: ServiceType }) => {
   );
 };
 
+const loadRazorpayScript = () =>
+  new Promise<boolean>((resolve) => {
+    if (window.Razorpay) {
+      resolve(true);
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = 'https://checkout.razorpay.com/v1/checkout.js';
+    script.async = true;
+    script.onload = () => resolve(true);
+    script.onerror = () => resolve(false);
+    document.body.appendChild(script);
+  });
+
+const buildReceipt = (prefix: string, id: string, extra?: string) => {
+  const cleanId = id.replace(/[^a-zA-Z0-9]/g, '').slice(0, 10);
+  const cleanExtra = (extra || '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6);
+  const ts = Date.now().toString().slice(-8);
+  return `${prefix}_${cleanId}${cleanExtra ? `_${cleanExtra}` : ''}_${ts}`.slice(0, 40);
+};
+
 enum OperationType {
   CREATE = 'create',
   UPDATE = 'update',
@@ -229,6 +250,30 @@ interface Payment {
   amount: number;
   status: 'Success' | 'Pending' | 'Failed';
   createdAt: string;
+}
+
+declare global {
+  interface Window {
+    Razorpay: new (options: {
+      key: string;
+      amount: number;
+      currency: string;
+      name: string;
+      description: string;
+      order_id: string;
+      handler: (response: {
+        razorpay_order_id: string;
+        razorpay_payment_id: string;
+        razorpay_signature: string;
+      }) => void;
+      prefill?: {
+        name?: string;
+        email?: string;
+      };
+      theme?: { color?: string };
+      modal?: { ondismiss?: () => void };
+    }) => { open: () => void };
+  }
 }
 
 interface TiffinService {
@@ -433,6 +478,7 @@ const FindMyStay = ({ user }: { user: FirebaseUser | null }) => {
   const [acFilter, setAcFilter] = useState<string>('All');
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [paymentStatus, setPaymentStatus] = useState<'idle' | 'processing' | 'success'>('idle');
+  const [paymentError, setPaymentError] = useState<string | null>(null);
   const [isAddingHostel, setIsAddingHostel] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [mainImagePreview, setMainImagePreview] = useState<string | null>(null);
@@ -890,15 +936,82 @@ const FindMyStay = ({ user }: { user: FirebaseUser | null }) => {
   });
 
   const handlePayment = async () => {
+    if (!selectedHostel) return;
+    setPaymentError(null);
     setPaymentStatus('processing');
-    // Simulate payment process
-    setTimeout(() => {
-      setPaymentStatus('success');
-      setTimeout(() => {
-        setShowPaymentModal(false);
-        setPaymentStatus('idle');
-      }, 2000);
-    }, 2000);
+
+    const sdkLoaded = await loadRazorpayScript();
+    if (!sdkLoaded) {
+      setPaymentStatus('idle');
+      setPaymentError('Razorpay SDK failed to load. Check your internet and try again.');
+      return;
+    }
+
+    try {
+      const orderResponse = await fetch('/api/razorpay/order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          amount: selectedHostel.price,
+          receipt: buildReceipt('hostel', selectedHostel.id),
+        }),
+      });
+      const orderPayload = await orderResponse.json();
+      if (!orderResponse.ok || !orderPayload?.order?.id) {
+        throw new Error(orderPayload?.error || 'Could not create Razorpay order.');
+      }
+
+      const razorpayKey = import.meta.env.VITE_RAZORPAY_KEY_ID as string | undefined;
+      if (!razorpayKey) {
+        throw new Error('Missing VITE_RAZORPAY_KEY_ID in frontend environment.');
+      }
+
+      const razorpay = new window.Razorpay({
+        key: razorpayKey,
+        amount: orderPayload.order.amount,
+        currency: orderPayload.order.currency,
+        name: 'Student Solution',
+        description: `Rent payment for ${selectedHostel.name}`,
+        order_id: orderPayload.order.id,
+        prefill: {
+          name: user?.displayName || undefined,
+          email: user?.email || undefined,
+        },
+        theme: { color: '#4f46e5' },
+        modal: {
+          ondismiss: () => {
+            setPaymentStatus('idle');
+          },
+        },
+        handler: async (response) => {
+          try {
+            const verifyResponse = await fetch('/api/razorpay/verify', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(response),
+            });
+            const verifyPayload = await verifyResponse.json();
+            if (!verifyResponse.ok || !verifyPayload?.isValid) {
+              throw new Error(verifyPayload?.error || 'Payment verification failed.');
+            }
+
+            setPaymentStatus('success');
+            setTimeout(() => {
+              setShowPaymentModal(false);
+              setPaymentStatus('idle');
+            }, 2000);
+          } catch (error) {
+            setPaymentStatus('idle');
+            setPaymentError(error instanceof Error ? error.message : 'Payment verification failed.');
+          }
+        },
+      });
+
+      razorpay.open();
+    } catch (error) {
+      setPaymentStatus('idle');
+      setPaymentError(error instanceof Error ? error.message : 'Payment could not be started.');
+    }
   };
 
   return (
@@ -1170,6 +1283,7 @@ const FindMyStay = ({ user }: { user: FirebaseUser | null }) => {
                     <p className="text-gray-400 text-xs uppercase tracking-widest font-bold mb-1">Total Amount</p>
                     <p className="text-4xl font-black text-indigo-600">₹{selectedHostel.price}</p>
                   </div>
+                  {paymentError && <p className="text-sm text-red-600 mb-4">{paymentError}</p>}
 
                   <div className="flex flex-col gap-4">
                     <button 
@@ -1735,6 +1849,7 @@ const TiffinMate = ({ user }: { user: FirebaseUser | null }) => {
   const [showReviews, setShowReviews] = useState(false);
   const [showSubscription, setShowSubscription] = useState(false);
   const [paymentStatus, setPaymentStatus] = useState<'idle' | 'processing' | 'success'>('idle');
+  const [paymentError, setPaymentError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [serviceImagePreview, setServiceImagePreview] = useState<string | null>(null);
   
@@ -1854,15 +1969,81 @@ const TiffinMate = ({ user }: { user: FirebaseUser | null }) => {
     }
   };
 
-  const handleSubscribe = async () => {
+  const handleSubscribe = async (plan: 'weekly' | 'monthly') => {
+    if (!selectedService) return;
+    setPaymentError(null);
     setPaymentStatus('processing');
-    setTimeout(() => {
-      setPaymentStatus('success');
-      setTimeout(() => {
-        setShowSubscription(false);
-        setPaymentStatus('idle');
-      }, 2000);
-    }, 2000);
+
+    const sdkLoaded = await loadRazorpayScript();
+    if (!sdkLoaded) {
+      setPaymentStatus('idle');
+      setPaymentError('Razorpay SDK failed to load. Check your internet and try again.');
+      return;
+    }
+
+    try {
+      const amount = selectedService.subscriptionPlans[plan];
+      const orderResponse = await fetch('/api/razorpay/order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          amount,
+          receipt: buildReceipt('tiffin', selectedService.id, plan),
+        }),
+      });
+      const orderPayload = await orderResponse.json();
+      if (!orderResponse.ok || !orderPayload?.order?.id) {
+        throw new Error(orderPayload?.error || 'Could not create Razorpay order.');
+      }
+
+      const razorpayKey = import.meta.env.VITE_RAZORPAY_KEY_ID as string | undefined;
+      if (!razorpayKey) {
+        throw new Error('Missing VITE_RAZORPAY_KEY_ID in frontend environment.');
+      }
+
+      const razorpay = new window.Razorpay({
+        key: razorpayKey,
+        amount: orderPayload.order.amount,
+        currency: orderPayload.order.currency,
+        name: 'Student Solution',
+        description: `${plan === 'weekly' ? 'Weekly' : 'Monthly'} tiffin subscription`,
+        order_id: orderPayload.order.id,
+        prefill: {
+          name: user?.displayName || undefined,
+          email: user?.email || undefined,
+        },
+        theme: { color: '#ea580c' },
+        modal: {
+          ondismiss: () => setPaymentStatus('idle'),
+        },
+        handler: async (response) => {
+          try {
+            const verifyResponse = await fetch('/api/razorpay/verify', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(response),
+            });
+            const verifyPayload = await verifyResponse.json();
+            if (!verifyResponse.ok || !verifyPayload?.isValid) {
+              throw new Error(verifyPayload?.error || 'Payment verification failed.');
+            }
+            setPaymentStatus('success');
+            setTimeout(() => {
+              setShowSubscription(false);
+              setPaymentStatus('idle');
+            }, 2000);
+          } catch (error) {
+            setPaymentStatus('idle');
+            setPaymentError(error instanceof Error ? error.message : 'Payment verification failed.');
+          }
+        },
+      });
+
+      razorpay.open();
+    } catch (error) {
+      setPaymentStatus('idle');
+      setPaymentError(error instanceof Error ? error.message : 'Payment could not be started.');
+    }
   };
 
   const filteredServices = services.filter(s => 
@@ -2161,15 +2342,16 @@ const TiffinMate = ({ user }: { user: FirebaseUser | null }) => {
                   <p className="text-gray-500 mb-8">Subscribe to <span className="font-bold text-gray-900">{selectedService.name}</span></p>
                   
                   <div className="grid grid-cols-2 gap-4 mb-8">
-                    <button onClick={handleSubscribe} className="p-6 bg-gray-50 rounded-3xl border-2 border-transparent hover:border-orange-500 transition-all text-left group">
+                    <button onClick={() => handleSubscribe('weekly')} className="p-6 bg-gray-50 rounded-3xl border-2 border-transparent hover:border-orange-500 transition-all text-left group">
                       <p className="text-xs text-gray-400 font-bold uppercase mb-1">Weekly</p>
                       <p className="text-2xl font-bold text-gray-900 group-hover:text-orange-600">₹{selectedService.subscriptionPlans.weekly}</p>
                     </button>
-                    <button onClick={handleSubscribe} className="p-6 bg-gray-50 rounded-3xl border-2 border-transparent hover:border-orange-500 transition-all text-left group">
+                    <button onClick={() => handleSubscribe('monthly')} className="p-6 bg-gray-50 rounded-3xl border-2 border-transparent hover:border-orange-500 transition-all text-left group">
                       <p className="text-xs text-gray-400 font-bold uppercase mb-1">Monthly</p>
                       <p className="text-2xl font-bold text-gray-900 group-hover:text-orange-600">₹{selectedService.subscriptionPlans.monthly}</p>
                     </button>
                   </div>
+                  {paymentError && <p className="text-sm text-red-600 mb-4">{paymentError}</p>}
 
                   <button onClick={() => setShowSubscription(false)} className="text-gray-400 font-bold hover:text-gray-600">Cancel</button>
                 </>
@@ -2240,7 +2422,7 @@ const StudentSwap = ({ user }: { user: FirebaseUser | null }) => {
   const [selectedItem, setSelectedItem] = useState<MarketItem | null>(null);
   const [showPayment, setShowPayment] = useState(false);
   const [paymentStatus, setPaymentStatus] = useState<'idle' | 'processing' | 'success'>('idle');
-  const [cardDetails, setCardDetails] = useState({ number: '', expiry: '', cvc: '' });
+  const [paymentError, setPaymentError] = useState<string | null>(null);
 
   const formatTimeAgo = (dateString: string) => {
     const date = new Date(dateString);
@@ -2312,44 +2494,91 @@ const StudentSwap = ({ user }: { user: FirebaseUser | null }) => {
 
   const handleBuy = async () => {
     if (!selectedItem) return;
+    setPaymentError(null);
     setPaymentStatus('processing');
-    
-    // If it's a mock item, just simulate success without Firestore
-    if (selectedItem.id.startsWith('mock-')) {
-      setTimeout(() => {
-        setPaymentStatus('success');
-        setCardDetails({ number: '', expiry: '', cvc: '' });
-        setTimeout(() => {
-          setShowPayment(false);
-          setPaymentStatus('idle');
-          setSelectedItem(null);
-          // Update local state for mock items since they won't trigger onSnapshot
-          setItems(prev => prev.map(item => 
-            item.id === selectedItem.id ? { ...item, availability: 'Sold' } : item
-          ));
-        }, 2000);
-      }, 2000);
+
+    const sdkLoaded = await loadRazorpayScript();
+    if (!sdkLoaded) {
+      setPaymentStatus('idle');
+      setPaymentError('Razorpay SDK failed to load. Check your internet and try again.');
       return;
     }
 
-    setTimeout(async () => {
-      try {
-        await setDoc(doc(db, 'marketItems', selectedItem.id), {
-          ...selectedItem,
-          availability: 'Sold'
-        });
-        setPaymentStatus('success');
-        setCardDetails({ number: '', expiry: '', cvc: '' });
-        setTimeout(() => {
-          setShowPayment(false);
-          setPaymentStatus('idle');
-          setSelectedItem(null);
-        }, 2000);
-      } catch (err) {
-        handleFirestoreError(err, OperationType.UPDATE, `marketItems/${selectedItem.id}`);
-        setPaymentStatus('idle');
+    try {
+      const orderResponse = await fetch('/api/razorpay/order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          amount: selectedItem.price,
+          receipt: buildReceipt('swap', selectedItem.id),
+        }),
+      });
+      const orderPayload = await orderResponse.json();
+      if (!orderResponse.ok || !orderPayload?.order?.id) {
+        throw new Error(orderPayload?.error || 'Could not create Razorpay order.');
       }
-    }, 2000);
+
+      const razorpayKey = import.meta.env.VITE_RAZORPAY_KEY_ID as string | undefined;
+      if (!razorpayKey) {
+        throw new Error('Missing VITE_RAZORPAY_KEY_ID in frontend environment.');
+      }
+
+      const razorpay = new window.Razorpay({
+        key: razorpayKey,
+        amount: orderPayload.order.amount,
+        currency: orderPayload.order.currency,
+        name: 'Student Solution',
+        description: `Purchase: ${selectedItem.title}`,
+        order_id: orderPayload.order.id,
+        prefill: {
+          name: user?.displayName || undefined,
+          email: user?.email || undefined,
+        },
+        theme: { color: '#4f46e5' },
+        modal: {
+          ondismiss: () => setPaymentStatus('idle'),
+        },
+        handler: async (response) => {
+          try {
+            const verifyResponse = await fetch('/api/razorpay/verify', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(response),
+            });
+            const verifyPayload = await verifyResponse.json();
+            if (!verifyResponse.ok || !verifyPayload?.isValid) {
+              throw new Error(verifyPayload?.error || 'Payment verification failed.');
+            }
+
+            if (selectedItem.id.startsWith('mock-')) {
+              setItems(prev => prev.map(item =>
+                item.id === selectedItem.id ? { ...item, availability: 'Sold' } : item
+              ));
+            } else {
+              await setDoc(doc(db, 'marketItems', selectedItem.id), {
+                ...selectedItem,
+                availability: 'Sold'
+              });
+            }
+
+            setPaymentStatus('success');
+            setTimeout(() => {
+              setShowPayment(false);
+              setPaymentStatus('idle');
+              setSelectedItem(null);
+            }, 2000);
+          } catch (error) {
+            setPaymentStatus('idle');
+            setPaymentError(error instanceof Error ? error.message : 'Payment verification failed.');
+          }
+        },
+      });
+
+      razorpay.open();
+    } catch (error) {
+      setPaymentStatus('idle');
+      setPaymentError(error instanceof Error ? error.message : 'Payment could not be started.');
+    }
   };
 
   const filteredItems = items.filter(item => {
@@ -2539,46 +2768,13 @@ const StudentSwap = ({ user }: { user: FirebaseUser | null }) => {
                   <h3 className="text-2xl font-bold mb-2">Payment Integration</h3>
                   <p className="text-gray-500 mb-6 text-sm">Securely purchase <span className="font-bold text-gray-900">{selectedItem.title}</span> for <span className="font-bold text-indigo-600">₹{selectedItem.price}</span></p>
                   
-                  <div className="space-y-4 mb-8 text-left">
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-gray-400 uppercase ml-1">Card Number</label>
-                      <input 
-                        type="text" 
-                        placeholder="0000 0000 0000 0000" 
-                        className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500"
-                        value={cardDetails.number}
-                        onChange={e => setCardDetails({...cardDetails, number: e.target.value.replace(/\D/g, '').slice(0, 16).replace(/(\d{4})/g, '$1 ').trim()})}
-                      />
-                    </div>
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-1">
-                        <label className="text-[10px] font-bold text-gray-400 uppercase ml-1">Expiry</label>
-                        <input 
-                          type="text" 
-                          placeholder="MM/YY" 
-                          className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500"
-                          value={cardDetails.expiry}
-                          onChange={e => setCardDetails({...cardDetails, expiry: e.target.value.replace(/\D/g, '').slice(0, 4).replace(/(\d{2})/, '$1/').replace(/\/$/, '')})}
-                        />
-                      </div>
-                      <div className="space-y-1">
-                        <label className="text-[10px] font-bold text-gray-400 uppercase ml-1">CVC</label>
-                        <input 
-                          type="password" 
-                          placeholder="***" 
-                          className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500"
-                          value={cardDetails.cvc}
-                          onChange={e => setCardDetails({...cardDetails, cvc: e.target.value.replace(/\D/g, '').slice(0, 3)})}
-                        />
-                      </div>
-                    </div>
-                  </div>
+                  <p className="text-sm text-gray-500 mb-8">You will be redirected to Razorpay secure checkout to complete this purchase.</p>
+                  {paymentError && <p className="text-sm text-red-600 mb-4">{paymentError}</p>}
 
                   <div className="space-y-3">
                     <button 
                       onClick={handleBuy} 
-                      disabled={!cardDetails.number || !cardDetails.expiry || !cardDetails.cvc}
-                      className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 disabled:opacity-50"
+                      className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100"
                     >
                       Pay ₹{selectedItem.price}
                     </button>
