@@ -50,6 +50,25 @@ service cloud.firestore {
              isValidDateString(data.createdAt);
     }
 
+    function isValidHostelReview(data) {
+      return data.keys().hasAll([
+        'hostelId',
+        'hostelName',
+        'userId',
+        'userName',
+        'rating',
+        'comment',
+        'createdAt'
+      ]) &&
+        data.userId == request.auth.uid &&
+        data.hostelId is string && data.hostelId.size() > 0 &&
+        data.hostelName is string && data.hostelName.size() > 0 &&
+        data.userName is string && data.userName.size() > 0 &&
+        data.rating is number && data.rating >= 1 && data.rating <= 5 &&
+        data.comment is string && data.comment.size() >= 1 && data.comment.size() <= 500 &&
+        isValidDateString(data.createdAt);
+    }
+
     // Rules
     match /users/{userId} {
       allow read: if isAuthenticated();
@@ -84,6 +103,11 @@ service cloud.firestore {
     match /jobs/{jobId} {
       allow read: if true;
       allow write: if false; // Admin only
+    }
+
+    match /hostelReviews/{reviewId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && isValidHostelReview(request.resource.data);
     }
   }
 }

@@ -252,6 +252,17 @@ interface Payment {
   createdAt: string;
 }
 
+interface HostelReview {
+  id?: string;
+  hostelId: string;
+  hostelName: string;
+  userId: string;
+  userName: string;
+  rating: number; // 1-5
+  comment: string;
+  createdAt: string;
+}
+
 declare global {
   interface Window {
     Razorpay: new (options: {
@@ -479,6 +490,11 @@ const FindMyStay = ({ user }: { user: FirebaseUser | null }) => {
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [paymentStatus, setPaymentStatus] = useState<'idle' | 'processing' | 'success'>('idle');
   const [paymentError, setPaymentError] = useState<string | null>(null);
+  const [showHostelReviews, setShowHostelReviews] = useState(false);
+  const [hostelReviews, setHostelReviews] = useState<HostelReview[]>([]);
+  const [reviewsLoading, setReviewsLoading] = useState(false);
+  const [reviewsError, setReviewsError] = useState<string | null>(null);
+  const [newHostelReview, setNewHostelReview] = useState({ rating: 5, comment: '' });
   const [isAddingHostel, setIsAddingHostel] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [mainImagePreview, setMainImagePreview] = useState<string | null>(null);
@@ -893,6 +909,32 @@ const FindMyStay = ({ user }: { user: FirebaseUser | null }) => {
     return () => unsubscribe();
   }, []);
 
+  useEffect(() => {
+    if (!showHostelReviews || !selectedHostel) return;
+    setReviewsLoading(true);
+    setReviewsError(null);
+
+    const q = query(
+      collection(db, 'hostelReviews'),
+      where('hostelId', '==', selectedHostel.id)
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const data = snapshot.docs.map(
+        (d) => ({ id: d.id, ...(d.data() as HostelReview) })
+      ) as HostelReview[];
+      // Avoid Firestore composite index requirements by sorting in the client.
+      data.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      setHostelReviews(data);
+      setReviewsLoading(false);
+    }, (err) => {
+      setReviewsError(err instanceof Error ? err.message : 'Failed to load reviews.');
+      setReviewsLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, [showHostelReviews, selectedHostel?.id]);
+
   const handleAddHostel = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user) return;
@@ -934,6 +976,43 @@ const FindMyStay = ({ user }: { user: FirebaseUser | null }) => {
     const matchesAC = acFilter === 'All' || (acFilter === 'AC' ? h.isAC : !h.isAC);
     return matchesSearch && matchesRoomType && matchesAC;
   });
+
+  const communityRating = hostelReviews.length
+    ? hostelReviews.reduce((acc, r) => acc + r.rating, 0) / hostelReviews.length
+    : selectedHostel?.rating ?? 0;
+
+  const handleAddHostelReview = async () => {
+    if (!selectedHostel) return;
+    if (!user) {
+      setReviewsError('Please sign in to leave a review.');
+      return;
+    }
+
+    const comment = newHostelReview.comment.trim();
+    if (!comment) {
+      setReviewsError('Please write a short comment.');
+      return;
+    }
+
+    setReviewsError(null);
+
+    try {
+      await addDoc(collection(db, 'hostelReviews'), {
+        hostelId: selectedHostel.id,
+        hostelName: selectedHostel.name,
+        userId: user.uid,
+        userName: user.displayName || 'Anonymous',
+        rating: newHostelReview.rating,
+        comment,
+        createdAt: new Date().toISOString()
+      });
+
+      setNewHostelReview({ rating: 5, comment: '' });
+    } catch (err) {
+      console.error(err);
+      setReviewsError(err instanceof Error ? err.message : 'Could not submit review.');
+    }
+  };
 
   const handlePayment = async () => {
     if (!selectedHostel) return;
@@ -1232,7 +1311,7 @@ const FindMyStay = ({ user }: { user: FirebaseUser | null }) => {
                   </div>
                 </div>
 
-                <div className="mt-auto flex flex-col sm:flex-row md:flex-col gap-3 md:gap-4">
+                <div className="mt-auto flex flex-col sm:flex-row flex-wrap md:flex-col gap-3 md:gap-4">
                   <button 
                     onClick={() => setShowPaymentModal(true)}
                     className="flex-1 bg-indigo-600 text-white py-4 md:py-5 rounded-2xl md:rounded-3xl font-bold text-base md:text-xl hover:bg-indigo-700 shadow-xl shadow-indigo-200 transition-all flex items-center justify-center space-x-3"
@@ -1247,6 +1326,13 @@ const FindMyStay = ({ user }: { user: FirebaseUser | null }) => {
                     <Phone size={20} className="md:w-6 md:h-6" />
                     <span>Contact Owner</span>
                   </a>
+                  <button
+                    onClick={() => setShowHostelReviews(true)}
+                    className="flex-1 bg-white text-indigo-600 border-2 border-indigo-100 py-4 md:py-5 rounded-2xl md:rounded-3xl font-bold text-base md:text-xl hover:bg-indigo-50 transition-all flex items-center justify-center space-x-3"
+                  >
+                    <Star size={20} className="md:w-6 md:h-6" />
+                    <span>Rate & Reviews</span>
+                  </button>
                 </div>
               </div>
             </motion.div>
@@ -1322,6 +1408,150 @@ const FindMyStay = ({ user }: { user: FirebaseUser | null }) => {
                   <h3 className="text-3xl font-black text-gray-900 mb-2">Payment Successful!</h3>
                   <p className="text-gray-500">Your rent has been paid successfully. Redirecting...</p>
                 </div>
+              )}
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Hostel Reviews Modal */}
+      <AnimatePresence>
+        {showHostelReviews && selectedHostel && (
+          <div className="fixed inset-0 z-[115] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowHostelReviews(false)}
+              className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.9, opacity: 0, y: 20 }}
+              className="relative bg-white w-full max-w-2xl rounded-[40px] p-6 md:p-10 shadow-2xl max-h-[90vh] overflow-y-auto"
+            >
+              <div className="flex justify-between items-start mb-6">
+                <div>
+                  <h3 className="text-2xl md:text-3xl font-black text-gray-900 mb-1">Rate & Reviews</h3>
+                  <p className="text-gray-500 text-sm">{selectedHostel.name}</p>
+                </div>
+                <button
+                  onClick={() => setShowHostelReviews(false)}
+                  className="p-2 hover:bg-gray-100 rounded-full transition-colors"
+                  aria-label="Close reviews modal"
+                >
+                  <X size={22} />
+                </button>
+              </div>
+
+              <div className="bg-gray-50 p-6 rounded-3xl border border-gray-100 mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-1">
+                    {[1, 2, 3, 4, 5].map((s) => (
+                      <Star
+                        key={s}
+                        size={18}
+                        className={s <= Math.round(communityRating) ? 'text-yellow-500 fill-yellow-500' : 'text-gray-300'}
+                      />
+                    ))}
+                  </div>
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-xl font-black text-gray-900">{communityRating.toFixed(1)}</span>
+                    <span className="text-gray-500 text-sm">({hostelReviews.length} reviews)</span>
+                  </div>
+                </div>
+              </div>
+
+              {reviewsLoading ? (
+                <div className="py-10 flex justify-center">
+                  <div className="w-10 h-10 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin" />
+                </div>
+              ) : (
+                <>
+                  <div className="space-y-4 mb-6">
+                    {!user ? (
+                      <p className="text-gray-500 text-sm">
+                        Please sign in to leave a rating and review.
+                      </p>
+                    ) : (
+                      <>
+                        <div>
+                          <p className="text-sm font-bold text-gray-700 mb-2">Your rating</p>
+                          <div className="flex items-center gap-2">
+                            {[1, 2, 3, 4, 5].map((s) => (
+                              <button
+                                key={s}
+                                type="button"
+                                onClick={() => setNewHostelReview((prev) => ({ ...prev, rating: s }))}
+                                className="p-1 rounded-lg hover:bg-gray-100 transition-colors"
+                                aria-label={`Set rating ${s}`}
+                              >
+                                <Star
+                                  size={22}
+                                  className={s <= newHostelReview.rating ? 'text-yellow-500 fill-yellow-500' : 'text-gray-300'}
+                                />
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          <p className="text-sm font-bold text-gray-700">Your review</p>
+                          <textarea
+                            value={newHostelReview.comment}
+                            onChange={(e) => setNewHostelReview((prev) => ({ ...prev, comment: e.target.value }))}
+                            placeholder="Write your experience..."
+                            className="w-full p-4 bg-white border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500 h-28"
+                          />
+                          {reviewsError && <p className="text-sm text-red-600">{reviewsError}</p>}
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={handleAddHostelReview}
+                          className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100"
+                        >
+                          Submit Review
+                        </button>
+                      </>
+                    )}
+                  </div>
+
+                  <div className="space-y-4">
+                    {hostelReviews.length === 0 ? (
+                      <p className="text-gray-500 text-sm text-center py-6">No reviews yet. Be the first!</p>
+                    ) : (
+                      hostelReviews.map((r) => (
+                        <div key={r.id} className="bg-white border border-gray-100 rounded-3xl p-5">
+                          <div className="flex justify-between items-start mb-2">
+                            <div className="flex items-center gap-3">
+                              <div className="w-10 h-10 bg-indigo-100 rounded-full flex items-center justify-center text-xs font-bold text-indigo-700">
+                                {r.userName?.[0] || 'U'}
+                              </div>
+                              <div>
+                                <p className="font-bold text-gray-900 text-sm">{r.userName}</p>
+                                <p className="text-gray-500 text-xs">
+                                  {new Date(r.createdAt).toLocaleDateString()}
+                                </p>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-1">
+                              {[1, 2, 3, 4, 5].map((s) => (
+                                <Star
+                                  key={s}
+                                  size={14}
+                                  className={s <= r.rating ? 'text-yellow-500 fill-yellow-500' : 'text-gray-300'}
+                                />
+                              ))}
+                            </div>
+                          </div>
+                          <p className="text-gray-700 text-sm whitespace-pre-wrap">{r.comment}</p>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </>
               )}
             </motion.div>
           </div>
