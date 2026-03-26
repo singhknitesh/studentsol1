@@ -79,6 +79,15 @@ function formatListingType(type: ListingType) {
   }
 }
 
+function listingRequestTitle(req: ListingRequest) {
+  const d = req.data || {};
+  if (req.type === 'hostel') return String(d.name || 'Hostel');
+  if (req.type === 'tiffin') return String(d.name || 'Tiffin service');
+  if (req.type === 'job') return String(d.title || 'Job');
+  if (req.type === 'item') return String(d.title || 'Item');
+  return formatListingType(req.type);
+}
+
 const SERVICE_CHAT_HINTS: Record<ServiceType, string[]> = {
   hostels: ['cheap hostel', 'AC room', 'single room', 'how to contact owner'],
   tiffin: ['monthly plan', 'veg menu', 'delivery time', 'best rated service'],
@@ -278,7 +287,7 @@ interface Transaction {
   id?: string;
   userId: string;
   amount: number;
-  purpose: 'listing_fee' | 'booking';
+  purpose: 'listing_fee' | 'booking' | 'donation';
   status: 'success' | 'failed' | 'pending';
   createdAt: string;
   listingRequestId?: string;
@@ -1046,6 +1055,7 @@ const FindMyStay = ({ user }: { user: FirebaseUser | null }) => {
         refId: requestRef.id,
       } satisfies Omit<AppNotification, 'id'>);
 
+      alert('Request submitted for admin approval. It will go live after approval.');
       setIsAddingHostel(false);
       setMainImagePreview(null);
       setRoomImagesPreviews([]);
@@ -2299,6 +2309,7 @@ const TiffinMate = ({ user }: { user: FirebaseUser | null }) => {
         refId: requestRef.id,
       } satisfies Omit<AppNotification, 'id'>);
 
+      alert('Request submitted for admin approval. It will go live after approval.');
       setIsAdding(false);
       setNewService({ 
         name: '', 
@@ -2898,6 +2909,7 @@ const StudentSwap = ({ user }: { user: FirebaseUser | null }) => {
         refId: requestRef.id,
       } satisfies Omit<AppNotification, 'id'>);
 
+      alert('Request submitted for admin approval. It will go live after approval.');
       setIsAdding(false);
       setNewItem({ title: '', price: '', category: 'Electronics', description: '' });
       setItemImagePreview(null);
@@ -3361,6 +3373,7 @@ const JobFinder = ({ user }: { user: FirebaseUser | null }) => {
         refId: requestRef.id,
       } satisfies Omit<AppNotification, 'id'>);
 
+      alert('Request submitted for admin approval. It will go live after approval.');
       setIsAdding(false);
       setNewJob({
         title: '',
@@ -3726,6 +3739,7 @@ async function publishFromRequest(reqId: string, req: ListingRequest, reviewerUi
 
 const UserDashboard = ({ user }: { user: FirebaseUser }) => {
   const [requests, setRequests] = useState<(ListingRequest & { id: string })[]>([]);
+  const [liveListings, setLiveListings] = useState<{ type: ListingType; title: string; createdAt: string; source: string; id: string }[]>([]);
   const [notifications, setNotifications] = useState<(AppNotification & { id: string })[]>([]);
   const [transactions, setTransactions] = useState<(Transaction & { id: string })[]>([]);
   const [bookings, setBookings] = useState<(Booking & { id: string })[]>([]);
@@ -3734,31 +3748,105 @@ const UserDashboard = ({ user }: { user: FirebaseUser }) => {
   const [payError, setPayError] = useState<string | null>(null);
 
   useEffect(() => {
-    const q = query(collection(db, 'listingRequests'), where('vendorId', '==', user.uid), orderBy('createdAt', 'desc'));
+    // Avoid composite index requirements by sorting client-side.
+    const q = query(collection(db, 'listingRequests'), where('vendorId', '==', user.uid));
     return onSnapshot(q, (snap) => {
-      setRequests(snap.docs.map(d => ({ id: d.id, ...(d.data() as ListingRequest) })));
+      const data = snap.docs.map(d => ({ id: d.id, ...(d.data() as ListingRequest) }));
+      data.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      setRequests(data);
+    }, (err) => {
+      setPayError(err instanceof Error ? err.message : 'Failed to load listing requests.');
     });
   }, [user.uid]);
 
   useEffect(() => {
-    const q = query(collection(db, 'notifications'), where('userId', '==', user.uid), orderBy('createdAt', 'desc'));
+    const q = query(collection(db, 'notifications'), where('userId', '==', user.uid));
     return onSnapshot(q, (snap) => {
-      setNotifications(snap.docs.map(d => ({ id: d.id, ...(d.data() as AppNotification) })));
+      const data = snap.docs.map(d => ({ id: d.id, ...(d.data() as AppNotification) }));
+      data.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      setNotifications(data);
     });
   }, [user.uid]);
 
   useEffect(() => {
-    const q = query(collection(db, 'transactions'), where('userId', '==', user.uid), orderBy('createdAt', 'desc'));
+    const q = query(collection(db, 'transactions'), where('userId', '==', user.uid));
     return onSnapshot(q, (snap) => {
-      setTransactions(snap.docs.map(d => ({ id: d.id, ...(d.data() as Transaction) })));
+      const data = snap.docs.map(d => ({ id: d.id, ...(d.data() as Transaction) }));
+      data.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      setTransactions(data);
     });
   }, [user.uid]);
 
   useEffect(() => {
-    const q = query(collection(db, 'bookings'), where('userId', '==', user.uid), orderBy('createdAt', 'desc'));
+    const q = query(collection(db, 'bookings'), where('userId', '==', user.uid));
     return onSnapshot(q, (snap) => {
-      setBookings(snap.docs.map(d => ({ id: d.id, ...(d.data() as Booking) })));
+      const data = snap.docs.map(d => ({ id: d.id, ...(d.data() as Booking) }));
+      data.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      setBookings(data);
     });
+  }, [user.uid]);
+
+  useEffect(() => {
+    // Live published entries (after admin publish) for this vendor.
+    const unsubscribers: Array<() => void> = [];
+
+    unsubscribers.push(onSnapshot(
+      query(collection(db, 'hostels'), where('ownerId', '==', user.uid)),
+      (snap) => {
+        const rows = snap.docs.map(d => {
+          const data = d.data() as any;
+          return { type: 'hostel' as const, title: String(data?.name || 'Hostel'), createdAt: String(data?.createdAt || ''), source: 'hostels', id: d.id };
+        });
+        setLiveListings(prev => {
+          const others = prev.filter(p => p.source !== 'hostels');
+          return [...others, ...rows].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        });
+      }
+    ));
+
+    unsubscribers.push(onSnapshot(
+      query(collection(db, 'tiffinServices'), where('ownerId', '==', user.uid)),
+      (snap) => {
+        const rows = snap.docs.map(d => {
+          const data = d.data() as any;
+          return { type: 'tiffin' as const, title: String(data?.name || 'Tiffin service'), createdAt: String(data?.createdAt || ''), source: 'tiffinServices', id: d.id };
+        });
+        setLiveListings(prev => {
+          const others = prev.filter(p => p.source !== 'tiffinServices');
+          return [...others, ...rows].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        });
+      }
+    ));
+
+    unsubscribers.push(onSnapshot(
+      query(collection(db, 'jobs'), where('postedBy', '==', user.uid)),
+      (snap) => {
+        const rows = snap.docs.map(d => {
+          const data = d.data() as any;
+          return { type: 'job' as const, title: String(data?.title || 'Job'), createdAt: String(data?.createdAt || ''), source: 'jobs', id: d.id };
+        });
+        setLiveListings(prev => {
+          const others = prev.filter(p => p.source !== 'jobs');
+          return [...others, ...rows].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        });
+      }
+    ));
+
+    unsubscribers.push(onSnapshot(
+      query(collection(db, 'marketItems'), where('sellerId', '==', user.uid)),
+      (snap) => {
+        const rows = snap.docs.map(d => {
+          const data = d.data() as any;
+          return { type: 'item' as const, title: String(data?.title || 'Item'), createdAt: String(data?.createdAt || ''), source: 'marketItems', id: d.id };
+        });
+        setLiveListings(prev => {
+          const others = prev.filter(p => p.source !== 'marketItems');
+          return [...others, ...rows].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        });
+      }
+    ));
+
+    return () => unsubscribers.forEach(u => u());
   }, [user.uid]);
 
   const payListingFee = async (reqId: string) => {
@@ -3888,25 +3976,107 @@ const UserDashboard = ({ user }: { user: FirebaseUser }) => {
       )}
 
       {tab === 'listings' && (
-        <div className="space-y-4">
-          {requests.map(r => (
-            <div key={r.id} className="bg-white border border-gray-100 rounded-2xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
-              <div>
-                <div className="font-bold text-gray-900">{formatListingType(r.type)}</div>
-                <div className="text-sm text-gray-500">Status: <span className="font-semibold">{r.status}</span> • {new Date(r.createdAt).toLocaleString()}</div>
+        <div className="space-y-10">
+          {(() => {
+            const pendingLike = requests.filter(r => ['pending', 'payment_pending'].includes(r.status));
+            const approvedLike = requests.filter(r => ['published', 'rejected'].includes(r.status));
+
+            const RequestRow: React.FC<{ r: (ListingRequest & { id: string }) }> = ({ r }) => (
+              <div key={r.id} className="bg-white border border-gray-100 rounded-2xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="font-bold text-gray-900 truncate">{listingRequestTitle(r)}</div>
+                  <div className="text-sm text-gray-500">
+                    <span className="font-semibold text-gray-700">{formatListingType(r.type)}</span>
+                    <span className="mx-2">•</span>
+                    Status: <span className="font-semibold">{r.status}</span>
+                    <span className="mx-2">•</span>
+                    {new Date(r.createdAt).toLocaleString()}
+                  </div>
+                </div>
+                {r.status === 'payment_pending' && r.feeRequired > 0 && (
+                  <button
+                    onClick={() => payListingFee(r.id)}
+                    disabled={payingId === r.id}
+                    className={cn("px-5 py-2 rounded-xl font-bold text-white whitespace-nowrap", payingId === r.id ? "bg-gray-400" : "bg-indigo-600 hover:bg-indigo-700")}
+                  >
+                    {payingId === r.id ? 'Starting payment...' : `Pay ₹${r.feeRequired}`}
+                  </button>
+                )}
               </div>
-              {r.status === 'payment_pending' && r.feeRequired > 0 && (
-                <button
-                  onClick={() => payListingFee(r.id)}
-                  disabled={payingId === r.id}
-                  className={cn("px-5 py-2 rounded-xl font-bold text-white", payingId === r.id ? "bg-gray-400" : "bg-indigo-600 hover:bg-indigo-700")}
-                >
-                  {payingId === r.id ? 'Starting payment...' : `Pay ₹${r.feeRequired}`}
-                </button>
-              )}
-            </div>
-          ))}
-          {requests.length === 0 && <div className="text-gray-500 bg-gray-50 border border-gray-100 rounded-2xl p-6">No listing requests yet.</div>}
+            );
+
+            return (
+              <>
+                <div>
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-xl font-bold text-gray-900">Live published entries</h2>
+                    <div className="text-sm text-gray-500">{liveListings.length} listing{liveListings.length === 1 ? '' : 's'}</div>
+                  </div>
+                  <div className="space-y-3">
+                    {liveListings.map((l) => (
+                      <div key={`${l.source}:${l.id}`} className="bg-white border border-gray-100 rounded-2xl p-5 flex items-center justify-between gap-4">
+                        <div className="min-w-0">
+                          <div className="font-bold text-gray-900 truncate">{l.title}</div>
+                          <div className="text-sm text-gray-500">
+                            <span className="font-semibold text-gray-700">{formatListingType(l.type)}</span>
+                            <span className="mx-2">•</span>
+                            Live
+                            {l.createdAt ? (
+                              <>
+                                <span className="mx-2">•</span>
+                                {new Date(l.createdAt).toLocaleString()}
+                              </>
+                            ) : null}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                    {liveListings.length === 0 && (
+                      <div className="text-gray-500 bg-gray-50 border border-gray-100 rounded-2xl p-6">
+                        No live listings yet (they appear here after admin approves and publishes).
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-xl font-bold text-gray-900">Pending / In Review</h2>
+                    <div className="text-sm text-gray-500">{pendingLike.length} request{pendingLike.length === 1 ? '' : 's'}</div>
+                  </div>
+                  <div className="space-y-4">
+                    {pendingLike.map(r => <RequestRow key={r.id} r={r} />)}
+                    {pendingLike.length === 0 && (
+                      <div className="text-gray-500 bg-gray-50 border border-gray-100 rounded-2xl p-6">
+                        No pending requests right now.
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-xl font-bold text-gray-900">Approved / Completed</h2>
+                    <div className="text-sm text-gray-500">{approvedLike.length} request{approvedLike.length === 1 ? '' : 's'}</div>
+                  </div>
+                  <div className="space-y-4">
+                    {approvedLike.map(r => <RequestRow key={r.id} r={r} />)}
+                    {approvedLike.length === 0 && (
+                      <div className="text-gray-500 bg-gray-50 border border-gray-100 rounded-2xl p-6">
+                        No approved/published requests yet.
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {requests.length === 0 && (
+                  <div className="text-gray-500 bg-gray-50 border border-gray-100 rounded-2xl p-6">
+                    No listing requests yet.
+                  </div>
+                )}
+              </>
+            );
+          })()}
         </div>
       )}
 
@@ -3949,8 +4119,12 @@ const AdminPanel = ({ user }: { user: FirebaseUser }) => {
   const [busyId, setBusyId] = useState<string | null>(null);
 
   useEffect(() => {
-    const q = query(collection(db, 'listingRequests'), where('status', '==', 'pending'), orderBy('createdAt', 'desc'));
-    return onSnapshot(q, (snap) => setPending(snap.docs.map(d => ({ id: d.id, ...(d.data() as ListingRequest) }))));
+    const q = query(collection(db, 'listingRequests'), where('status', '==', 'pending'));
+    return onSnapshot(q, (snap) => {
+      const data = snap.docs.map(d => ({ id: d.id, ...(d.data() as ListingRequest) }));
+      data.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      setPending(data);
+    });
   }, []);
 
   useEffect(() => {
@@ -4134,6 +4308,10 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [role, setRole] = useState<UserRole | null>(null);
+  const [showDonate, setShowDonate] = useState(false);
+  const [donateAmount, setDonateAmount] = useState<string>('50');
+  const [donateStatus, setDonateStatus] = useState<'idle' | 'processing' | 'success'>('idle');
+  const [donateError, setDonateError] = useState<string | null>(null);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (u) => {
@@ -4155,6 +4333,97 @@ export default function App() {
 
   const handleLogout = async () => {
     await signOut(auth);
+  };
+
+  const handleDonate = async () => {
+    if (!user) {
+      setShowDonate(false);
+      return;
+    }
+    setDonateError(null);
+    const amount = Number(donateAmount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setDonateError('Please enter a valid amount.');
+      return;
+    }
+
+    setDonateStatus('processing');
+    const sdkLoaded = await loadRazorpayScript();
+    if (!sdkLoaded) {
+      setDonateStatus('idle');
+      setDonateError('Razorpay SDK failed to load. Check your internet and try again.');
+      return;
+    }
+
+    try {
+      const orderResponse = await fetch('/api/razorpay/order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          amount,
+          receipt: buildReceipt('donate', user.uid),
+        }),
+      });
+      const orderPayload = await orderResponse.json();
+      if (!orderResponse.ok || !orderPayload?.order?.id) {
+        throw new Error(orderPayload?.error || 'Could not create Razorpay order.');
+      }
+
+      const razorpayKey = import.meta.env.VITE_RAZORPAY_KEY_ID as string | undefined;
+      if (!razorpayKey) throw new Error('Missing VITE_RAZORPAY_KEY_ID in frontend environment.');
+
+      const razorpay = new window.Razorpay({
+        key: razorpayKey,
+        amount: orderPayload.order.amount,
+        currency: orderPayload.order.currency,
+        name: 'Student Solution',
+        description: 'Support our company (donation)',
+        order_id: orderPayload.order.id,
+        prefill: { name: user.displayName || undefined, email: user.email || undefined },
+        theme: { color: '#4f46e5' },
+        modal: { ondismiss: () => setDonateStatus('idle') },
+        handler: async (response) => {
+          try {
+            const verifyResponse = await fetch('/api/razorpay/verify', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(response),
+            });
+            const verifyPayload = await verifyResponse.json();
+            if (!verifyResponse.ok || !verifyPayload?.isValid) {
+              throw new Error(verifyPayload?.error || 'Payment verification failed.');
+            }
+
+            await addDoc(collection(db, 'transactions'), {
+              userId: user.uid,
+              amount,
+              purpose: 'donation',
+              status: 'success',
+              createdAt: new Date().toISOString(),
+              razorpay: {
+                orderId: response.razorpay_order_id,
+                paymentId: response.razorpay_payment_id,
+                signature: response.razorpay_signature,
+              },
+            } as any);
+
+            setDonateStatus('success');
+            setTimeout(() => {
+              setShowDonate(false);
+              setDonateStatus('idle');
+            }, 1200);
+          } catch (e) {
+            setDonateStatus('idle');
+            setDonateError(e instanceof Error ? e.message : 'Donation failed.');
+          }
+        },
+      });
+
+      razorpay.open();
+    } catch (e) {
+      setDonateStatus('idle');
+      setDonateError(e instanceof Error ? e.message : 'Could not start payment.');
+    }
   };
 
   useEffect(() => {
@@ -4203,15 +4472,121 @@ export default function App() {
           </main>
           
           <footer className="bg-gray-50 py-20 mt-20 border-t border-gray-100">
-            <div className="max-w-7xl mx-auto px-4 text-center">
-              <div className="flex items-center justify-center space-x-2 mb-6">
-                <img src={logo} className="w-8 h-8 rounded-lg" alt="Student Solution logo" />
-                <span className="font-bold text-xl tracking-tight">Student Solution</span>
+            <div className="max-w-7xl mx-auto px-4">
+              <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-10">
+                <div className="text-center md:text-left">
+                  <div className="flex items-center justify-center md:justify-start space-x-2 mb-4">
+                    <img src={logo} className="w-8 h-8 rounded-lg" alt="Student Solution logo" />
+                    <span className="font-bold text-xl tracking-tight">Student Solution</span>
+                  </div>
+                  <p className="text-gray-400 max-w-md">
+                    Empowering students with essential utilities for a better campus life experience.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-8 text-sm">
+                  <div>
+                    <div className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Services</div>
+                    <div className="space-y-2">
+                      <Link className="block text-gray-600 hover:text-indigo-600 font-medium" to="/hostels">Hostels</Link>
+                      <Link className="block text-gray-600 hover:text-indigo-600 font-medium" to="/tiffin">Tiffin</Link>
+                      <Link className="block text-gray-600 hover:text-indigo-600 font-medium" to="/swap">Market</Link>
+                      <Link className="block text-gray-600 hover:text-indigo-600 font-medium" to="/jobs">Jobs</Link>
+                      <Link className="block text-gray-600 hover:text-indigo-600 font-medium" to="/dashboard">My Dashboard</Link>
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Company</div>
+                    <div className="space-y-2">
+                      <Link className="block text-gray-600 hover:text-indigo-600 font-medium" to="/">Home</Link>
+                      <Link className="block text-gray-600 hover:text-indigo-600 font-medium" to="/auth">Sign In</Link>
+                      {role === 'admin' && (
+                        <Link className="block text-gray-600 hover:text-indigo-600 font-medium" to="/admin">Admin Panel</Link>
+                      )}
+                    </div>
+                  </div>
+                  <div className="col-span-2 sm:col-span-1">
+                    <div className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Support</div>
+                    <button
+                      onClick={() => user ? setShowDonate(true) : (window.location.href = '/auth')}
+                      className="w-full bg-indigo-600 text-white px-5 py-3 rounded-2xl font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100"
+                    >
+                      Support our company
+                    </button>
+                    <p className="text-xs text-gray-400 mt-2">Donate any amount via Razorpay.</p>
+                  </div>
+                </div>
               </div>
-              <p className="text-gray-400 max-w-md mx-auto mb-8">Empowering students with essential utilities for a better campus life experience.</p>
-              <p className="text-gray-400 text-sm">© 2026 Student Solution. All rights reserved.</p>
+
+              <div className="mt-12 pt-8 border-t border-gray-100 text-center">
+                <p className="text-gray-400 text-sm mb-2">© 2026 Student Solution. All rights reserved.</p>
+                <p className="text-gray-500 font-semibold">India's biggest platform for Student</p>
+              </div>
             </div>
           </footer>
+
+          <AnimatePresence>
+            {showDonate && (
+              <div className="fixed inset-0 z-[140] flex items-center justify-center p-4">
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  onClick={() => donateStatus !== 'processing' && setShowDonate(false)}
+                  className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+                />
+                <motion.div
+                  initial={{ opacity: 0, y: 12, scale: 0.98 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 12, scale: 0.98 }}
+                  className="relative w-full max-w-md bg-white rounded-[2.5rem] border border-gray-100 shadow-2xl p-8"
+                >
+                  <div className="flex items-start justify-between gap-4 mb-6">
+                    <div>
+                      <h3 className="text-2xl font-extrabold text-gray-900">Support our company</h3>
+                      <p className="text-gray-500">Enter how much you want to donate.</p>
+                    </div>
+                    <button
+                      onClick={() => donateStatus !== 'processing' && setShowDonate(false)}
+                      className="w-10 h-10 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center text-gray-600"
+                      aria-label="Close"
+                    >
+                      <X size={18} />
+                    </button>
+                  </div>
+
+                  {donateError && (
+                    <div className="mb-4 bg-red-50 border border-red-100 text-red-700 px-4 py-3 rounded-2xl text-sm">
+                      {donateError}
+                    </div>
+                  )}
+
+                  <div className="space-y-3">
+                    <label className="text-xs font-bold text-gray-400 uppercase tracking-wider">Amount (₹)</label>
+                    <input
+                      value={donateAmount}
+                      onChange={(e) => setDonateAmount(e.target.value)}
+                      inputMode="numeric"
+                      className="w-full px-4 py-3 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500"
+                      placeholder="50"
+                      disabled={donateStatus === 'processing'}
+                    />
+                  </div>
+
+                  <button
+                    onClick={handleDonate}
+                    disabled={donateStatus === 'processing'}
+                    className={cn(
+                      "w-full mt-6 py-4 rounded-2xl font-extrabold text-white transition-all",
+                      donateStatus === 'processing' ? "bg-gray-400" : "bg-indigo-600 hover:bg-indigo-700"
+                    )}
+                  >
+                    {donateStatus === 'processing' ? 'Opening Razorpay...' : 'Donate now'}
+                  </button>
+                </motion.div>
+              </div>
+            )}
+          </AnimatePresence>
         </div>
       </Router>
     </ErrorBoundary>
