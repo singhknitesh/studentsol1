@@ -8,6 +8,11 @@ service cloud.firestore {
     function isOwner(userId) {
       return isAuthenticated() && request.auth.uid == userId;
     }
+    function isAdmin() {
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
     function isValidEmail(email) {
       return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
     }
@@ -73,14 +78,43 @@ service cloud.firestore {
     match /users/{userId} {
       allow read: if isAuthenticated();
       allow create: if isOwner(userId) && isValidUser(request.resource.data);
-      allow update: if isOwner(userId) && isValidUser(request.resource.data);
+      // User can update own basic profile; admin can update role.
+      allow update: if (isOwner(userId) && request.resource.data.uid == request.auth.uid) || isAdmin();
+    }
+
+    match /listingRequests/{requestId} {
+      allow read: if isAdmin() || (isAuthenticated() && request.auth.uid == resource.data.vendorId);
+      allow create: if isAuthenticated()
+        && request.resource.data.vendorId == request.auth.uid
+        && request.resource.data.status == 'pending';
+      allow update: if isAdmin() || (isAuthenticated()
+        && request.auth.uid == resource.data.vendorId
+        && resource.data.status == 'payment_pending'
+        && request.resource.data.status == 'published');
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if isAuthenticated() && request.auth.uid == resource.data.userId;
+      allow create: if isAdmin() || (isAuthenticated() && request.auth.uid == request.resource.data.userId);
+      allow update: if isAuthenticated() && request.auth.uid == resource.data.userId;
+    }
+
+    match /transactions/{transactionId} {
+      allow read: if isAdmin() || (isAuthenticated() && request.auth.uid == resource.data.userId);
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+    }
+
+    match /bookings/{bookingId} {
+      allow read: if isAuthenticated() && request.auth.uid == resource.data.userId;
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
     }
 
     match /hostels/{hostelId} {
       allow read: if true;
-      allow create: if isAuthenticated() && isValidHostel(request.resource.data);
-      allow update: if isAuthenticated() && request.auth.uid == resource.data.ownerId && isValidHostel(request.resource.data);
-      allow delete: if isAuthenticated() && request.auth.uid == resource.data.ownerId;
+      // Vendors must use listingRequests; only admin publishes.
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
     }
 
     match /payments/{paymentId} {
@@ -90,19 +124,18 @@ service cloud.firestore {
 
     match /tiffinServices/{serviceId} {
       allow read: if true;
-      allow write: if false; // Admin only
+      allow write: if isAdmin();
     }
 
     match /marketItems/{itemId} {
       allow read: if true;
-      allow create: if isAuthenticated() && isValidMarketItem(request.resource.data);
-      allow update: if isAuthenticated() && request.auth.uid == resource.data.sellerId && isValidMarketItem(request.resource.data);
-      allow delete: if isAuthenticated() && request.auth.uid == resource.data.sellerId;
+      // Vendors must use listingRequests; only admin publishes. Buyers can mark as sold via app write? Keep admin-only for now.
+      allow create, update, delete: if isAdmin();
     }
 
     match /jobs/{jobId} {
       allow read: if true;
-      allow write: if false; // Admin only
+      allow write: if isAdmin();
     }
 
     match /hostelReviews/{reviewId} {

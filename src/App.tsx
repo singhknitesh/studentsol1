@@ -45,7 +45,8 @@ import {
   getDoc, 
   getDocs,
   orderBy,
-  deleteDoc
+  deleteDoc,
+  updateDoc
 } from 'firebase/firestore';
 import { auth, db } from './firebase';
 import { clsx, type ClassValue } from 'clsx';
@@ -59,6 +60,24 @@ function cn(...inputs: ClassValue[]) {
 
 type ServiceType = 'hostels' | 'tiffin' | 'swap' | 'jobs';
 type ChatMessage = { from: 'user' | 'bot'; text: string };
+type UserRole = 'user' | 'admin';
+type ListingType = 'hostel' | 'tiffin' | 'job' | 'item';
+
+type ListingRequestStatus = 'pending' | 'approved' | 'rejected' | 'payment_pending' | 'published';
+
+function listingFeeFor(type: ListingType) {
+  if (type === 'item') return 0;
+  return 50;
+}
+
+function formatListingType(type: ListingType) {
+  switch (type) {
+    case 'hostel': return 'Hostel';
+    case 'tiffin': return 'Tiffin Service';
+    case 'job': return 'Job';
+    case 'item': return 'Item';
+  }
+}
 
 const SERVICE_CHAT_HINTS: Record<ServiceType, string[]> = {
   hostels: ['cheap hostel', 'AC room', 'single room', 'how to contact owner'],
@@ -223,6 +242,62 @@ interface UserData {
   email: string;
   photoURL: string;
   createdAt: string;
+  role?: UserRole;
+}
+
+interface ListingRequest {
+  id?: string;
+  type: ListingType;
+  status: ListingRequestStatus;
+  vendorId: string;
+  vendorName: string;
+  vendorEmail?: string | null;
+  createdAt: string;
+  reviewedAt?: string;
+  reviewedBy?: string;
+  feeRequired: number;
+  feePaid: boolean;
+  publishedCollection?: 'hostels' | 'tiffinServices' | 'jobs' | 'marketItems';
+  publishedId?: string;
+  data: Record<string, any>;
+}
+
+interface AppNotification {
+  id?: string;
+  userId: string;
+  title: string;
+  message: string;
+  createdAt: string;
+  read: boolean;
+  kind: 'approval' | 'payment' | 'admin';
+  refType?: 'listingRequest' | 'transaction' | 'booking';
+  refId?: string;
+}
+
+interface Transaction {
+  id?: string;
+  userId: string;
+  amount: number;
+  purpose: 'listing_fee' | 'booking';
+  status: 'success' | 'failed' | 'pending';
+  createdAt: string;
+  listingRequestId?: string;
+  razorpay?: {
+    orderId?: string;
+    paymentId?: string;
+    signature?: string;
+  };
+}
+
+interface Booking {
+  id?: string;
+  userId: string;
+  type: 'hostel' | 'tiffin' | 'swap';
+  itemId: string;
+  itemTitle: string;
+  amount: number;
+  createdAt: string;
+  status: 'success' | 'pending' | 'failed';
 }
 
 interface Hostel {
@@ -428,6 +503,7 @@ const Navbar = ({ user, onLogout, isDarkMode, onToggleDarkMode }: { user: Fireba
           <Link to="/jobs" className="text-gray-600 hover:text-indigo-600 font-medium hidden md:block">Jobs</Link>
           {user ? (
             <div className="flex items-center space-x-4 ml-4 pl-4 border-l border-gray-100">
+              <Link to="/dashboard" className="text-gray-600 hover:text-indigo-600 font-medium hidden md:block">Dashboard</Link>
               <img src={user.photoURL || ''} className="w-8 h-8 rounded-full border border-gray-200" alt="" />
               <button onClick={onLogout} className="text-gray-500 hover:text-red-600 transition-colors">
                 <LogOut size={20} />
@@ -448,6 +524,7 @@ const Dashboard = () => {
     { id: 'tiffin', title: 'TiffinMate', desc: 'Home-cooked tiffin services', icon: <Utensils />, color: 'bg-orange-50 text-orange-600', path: '/tiffin' },
     { id: 'swap', title: 'StudentSwap', desc: 'Buy & sell old items', icon: <ShoppingBag />, color: 'bg-green-50 text-green-600', path: '/swap' },
     { id: 'jobs', title: 'Job Finder', desc: 'Student-friendly local jobs', icon: <Briefcase />, color: 'bg-purple-50 text-purple-600', path: '/jobs' },
+    { id: 'dashboard', title: 'My Dashboard', desc: 'Bookings, listings, approvals & notifications', icon: <User />, color: 'bg-indigo-50 text-indigo-600', path: '/dashboard' },
   ];
 
   return (
@@ -941,11 +1018,34 @@ const FindMyStay = ({ user }: { user: FirebaseUser | null }) => {
     
     setIsSubmitting(true);
     try {
-      await addDoc(collection(db, 'hostels'), {
-        ...newHostel,
-        ownerId: user.uid,
-        createdAt: new Date().toISOString()
-      });
+      const req: Omit<ListingRequest, 'id'> = {
+        type: 'hostel',
+        status: 'pending',
+        vendorId: user.uid,
+        vendorName: user.displayName || 'Vendor',
+        vendorEmail: user.email,
+        createdAt: new Date().toISOString(),
+        feeRequired: listingFeeFor('hostel'),
+        feePaid: false,
+        publishedCollection: 'hostels',
+        data: {
+          ...newHostel,
+          ownerId: user.uid,
+          createdAt: new Date().toISOString(),
+        },
+      };
+      const requestRef = await addDoc(collection(db, 'listingRequests'), req);
+      await addDoc(collection(db, 'notifications'), {
+        userId: user.uid,
+        title: 'Listing request submitted',
+        message: `Your ${formatListingType('hostel')} request was submitted for admin approval.`,
+        createdAt: new Date().toISOString(),
+        read: false,
+        kind: 'admin',
+        refType: 'listingRequest',
+        refId: requestRef.id,
+      } satisfies Omit<AppNotification, 'id'>);
+
       setIsAddingHostel(false);
       setMainImagePreview(null);
       setRoomImagesPreviews([]);
@@ -963,7 +1063,7 @@ const FindMyStay = ({ user }: { user: FirebaseUser | null }) => {
         isAC: false
       });
     } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, 'hostels');
+      handleFirestoreError(error, OperationType.CREATE, 'listingRequests (hostel)');
     } finally {
       setIsSubmitting(false);
     }
@@ -1072,6 +1172,30 @@ const FindMyStay = ({ user }: { user: FirebaseUser | null }) => {
             const verifyPayload = await verifyResponse.json();
             if (!verifyResponse.ok || !verifyPayload?.isValid) {
               throw new Error(verifyPayload?.error || 'Payment verification failed.');
+            }
+
+            if (user) {
+              await addDoc(collection(db, 'bookings'), {
+                userId: user.uid,
+                type: 'hostel',
+                itemId: selectedHostel.id,
+                itemTitle: selectedHostel.name,
+                amount: selectedHostel.price,
+                createdAt: new Date().toISOString(),
+                status: 'success',
+              } satisfies Omit<Booking, 'id'>);
+              await addDoc(collection(db, 'transactions'), {
+                userId: user.uid,
+                amount: selectedHostel.price,
+                purpose: 'booking',
+                status: 'success',
+                createdAt: new Date().toISOString(),
+                razorpay: {
+                  orderId: response.razorpay_order_id,
+                  paymentId: response.razorpay_payment_id,
+                  signature: response.razorpay_signature,
+                },
+              } satisfies Omit<Transaction, 'id'>);
             }
 
             setPaymentStatus('success');
@@ -2133,25 +2257,48 @@ const TiffinMate = ({ user }: { user: FirebaseUser | null }) => {
     if (!user) return;
     setIsSubmitting(true);
     try {
-      await addDoc(collection(db, 'tiffinServices'), {
-        ownerId: user.uid,
-        name: newService.name,
-        description: newService.description,
-        pricePerMeal: Number(newService.pricePerMeal),
-        subscriptionPlans: {
-          weekly: Number(newService.weeklyPrice),
-          monthly: Number(newService.monthlyPrice),
+      const req: Omit<ListingRequest, 'id'> = {
+        type: 'tiffin',
+        status: 'pending',
+        vendorId: user.uid,
+        vendorName: user.displayName || 'Vendor',
+        vendorEmail: user.email,
+        createdAt: new Date().toISOString(),
+        feeRequired: listingFeeFor('tiffin'),
+        feePaid: false,
+        publishedCollection: 'tiffinServices',
+        data: {
+          ownerId: user.uid,
+          name: newService.name,
+          description: newService.description,
+          pricePerMeal: Number(newService.pricePerMeal),
+          subscriptionPlans: {
+            weekly: Number(newService.weeklyPrice),
+            monthly: Number(newService.monthlyPrice),
+          },
+          fullMenu: newService.fullMenu.map(day => ({
+            day: day.day,
+            items: day.items.split(',').map(i => i.trim()).filter(i => i !== '')
+          })),
+          imageUrl: serviceImagePreview || `https://picsum.photos/seed/${newService.name}/400/300`,
+          contact: newService.contact,
+          rating: 5,
+          reviews: [],
+          createdAt: new Date().toISOString(),
         },
-        fullMenu: newService.fullMenu.map(day => ({
-          day: day.day,
-          items: day.items.split(',').map(i => i.trim()).filter(i => i !== '')
-        })),
-        imageUrl: serviceImagePreview || `https://picsum.photos/seed/${newService.name}/400/300`,
-        contact: newService.contact,
-        rating: 5,
-        reviews: [],
-        createdAt: new Date().toISOString()
-      });
+      };
+      const requestRef = await addDoc(collection(db, 'listingRequests'), req);
+      await addDoc(collection(db, 'notifications'), {
+        userId: user.uid,
+        title: 'Listing request submitted',
+        message: `Your ${formatListingType('tiffin')} request was submitted for admin approval.`,
+        createdAt: new Date().toISOString(),
+        read: false,
+        kind: 'admin',
+        refType: 'listingRequest',
+        refId: requestRef.id,
+      } satisfies Omit<AppNotification, 'id'>);
+
       setIsAdding(false);
       setNewService({ 
         name: '', 
@@ -2164,7 +2311,7 @@ const TiffinMate = ({ user }: { user: FirebaseUser | null }) => {
       });
       setServiceImagePreview(null);
     } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, 'tiffinServices');
+      handleFirestoreError(err, OperationType.CREATE, 'listingRequests (tiffin)');
     } finally {
       setIsSubmitting(false);
     }
@@ -2256,6 +2403,30 @@ const TiffinMate = ({ user }: { user: FirebaseUser | null }) => {
             const verifyPayload = await verifyResponse.json();
             if (!verifyResponse.ok || !verifyPayload?.isValid) {
               throw new Error(verifyPayload?.error || 'Payment verification failed.');
+            }
+            if (user && selectedService) {
+              const amount = selectedService.subscriptionPlans[plan];
+              await addDoc(collection(db, 'bookings'), {
+                userId: user.uid,
+                type: 'tiffin',
+                itemId: selectedService.id,
+                itemTitle: `${selectedService.name} (${plan})`,
+                amount,
+                createdAt: new Date().toISOString(),
+                status: 'success',
+              } satisfies Omit<Booking, 'id'>);
+              await addDoc(collection(db, 'transactions'), {
+                userId: user.uid,
+                amount,
+                purpose: 'booking',
+                status: 'success',
+                createdAt: new Date().toISOString(),
+                razorpay: {
+                  orderId: response.razorpay_order_id,
+                  paymentId: response.razorpay_payment_id,
+                  signature: response.razorpay_signature,
+                },
+              } satisfies Omit<Transaction, 'id'>);
             }
             setPaymentStatus('success');
             setTimeout(() => {
@@ -2693,22 +2864,45 @@ const StudentSwap = ({ user }: { user: FirebaseUser | null }) => {
     if (!user) return;
     setIsSubmitting(true);
     try {
-      await addDoc(collection(db, 'marketItems'), {
-        sellerId: user.uid,
-        sellerName: user.displayName,
-        title: newItem.title,
-        price: Number(newItem.price),
-        category: newItem.category,
-        description: newItem.description,
-        imageUrl: itemImagePreview || `https://picsum.photos/seed/${newItem.title}/400/300`,
+      const req: Omit<ListingRequest, 'id'> = {
+        type: 'item',
+        status: 'pending',
+        vendorId: user.uid,
+        vendorName: user.displayName || 'Vendor',
+        vendorEmail: user.email,
         createdAt: new Date().toISOString(),
-        availability: 'Available'
-      });
+        feeRequired: listingFeeFor('item'),
+        feePaid: true,
+        publishedCollection: 'marketItems',
+        data: {
+          sellerId: user.uid,
+          sellerName: user.displayName,
+          title: newItem.title,
+          price: Number(newItem.price),
+          category: newItem.category,
+          description: newItem.description,
+          imageUrl: itemImagePreview || `https://picsum.photos/seed/${newItem.title}/400/300`,
+          createdAt: new Date().toISOString(),
+          availability: 'Available',
+        },
+      };
+      const requestRef = await addDoc(collection(db, 'listingRequests'), req);
+      await addDoc(collection(db, 'notifications'), {
+        userId: user.uid,
+        title: 'Listing request submitted',
+        message: `Your ${formatListingType('item')} request was submitted for admin approval.`,
+        createdAt: new Date().toISOString(),
+        read: false,
+        kind: 'admin',
+        refType: 'listingRequest',
+        refId: requestRef.id,
+      } satisfies Omit<AppNotification, 'id'>);
+
       setIsAdding(false);
       setNewItem({ title: '', price: '', category: 'Electronics', description: '' });
       setItemImagePreview(null);
     } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, 'marketItems');
+      handleFirestoreError(err, OperationType.CREATE, 'listingRequests (item)');
     } finally {
       setIsSubmitting(false);
     }
@@ -2778,6 +2972,30 @@ const StudentSwap = ({ user }: { user: FirebaseUser | null }) => {
             const verifyPayload = await verifyResponse.json();
             if (!verifyResponse.ok || !verifyPayload?.isValid) {
               throw new Error(verifyPayload?.error || 'Payment verification failed.');
+            }
+
+            if (user && selectedItem) {
+              await addDoc(collection(db, 'bookings'), {
+                userId: user.uid,
+                type: 'swap',
+                itemId: selectedItem.id,
+                itemTitle: selectedItem.title,
+                amount: selectedItem.price,
+                createdAt: new Date().toISOString(),
+                status: 'success',
+              } satisfies Omit<Booking, 'id'>);
+              await addDoc(collection(db, 'transactions'), {
+                userId: user.uid,
+                amount: selectedItem.price,
+                purpose: 'booking',
+                status: 'success',
+                createdAt: new Date().toISOString(),
+                razorpay: {
+                  orderId: response.razorpay_order_id,
+                  paymentId: response.razorpay_payment_id,
+                  signature: response.razorpay_signature,
+                },
+              } satisfies Omit<Transaction, 'id'>);
             }
 
             if (selectedItem.id.startsWith('mock-')) {
@@ -3115,11 +3333,34 @@ const JobFinder = ({ user }: { user: FirebaseUser | null }) => {
     if (!user) return;
     setIsSubmitting(true);
     try {
-      await addDoc(collection(db, 'jobs'), {
-        ...newJob,
+      const req: Omit<ListingRequest, 'id'> = {
+        type: 'job',
+        status: 'pending',
+        vendorId: user.uid,
+        vendorName: user.displayName || 'Vendor',
+        vendorEmail: user.email,
         createdAt: new Date().toISOString(),
-        postedBy: user.uid
-      });
+        feeRequired: listingFeeFor('job'),
+        feePaid: false,
+        publishedCollection: 'jobs',
+        data: {
+          ...newJob,
+          createdAt: new Date().toISOString(),
+          postedBy: user.uid,
+        },
+      };
+      const requestRef = await addDoc(collection(db, 'listingRequests'), req);
+      await addDoc(collection(db, 'notifications'), {
+        userId: user.uid,
+        title: 'Listing request submitted',
+        message: `Your ${formatListingType('job')} request was submitted for admin approval.`,
+        createdAt: new Date().toISOString(),
+        read: false,
+        kind: 'admin',
+        refType: 'listingRequest',
+        refId: requestRef.id,
+      } satisfies Omit<AppNotification, 'id'>);
+
       setIsAdding(false);
       setNewJob({
         title: '',
@@ -3133,7 +3374,7 @@ const JobFinder = ({ user }: { user: FirebaseUser | null }) => {
         eligibility: ''
       });
     } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, 'jobs');
+      handleFirestoreError(err, OperationType.CREATE, 'listingRequests (job)');
     } finally {
       setIsSubmitting(false);
     }
@@ -3387,8 +3628,14 @@ const AuthPage = () => {
           displayName: user.displayName,
           email: user.email,
           photoURL: user.photoURL,
-          createdAt: new Date().toISOString()
+          createdAt: new Date().toISOString(),
+          role: 'user'
         });
+      } else {
+        const existing = userSnap.data() as Partial<UserData>;
+        if (!existing.role) {
+          await updateDoc(userRef, { role: 'user' });
+        }
       }
     } catch (err) {
       console.error(err);
@@ -3433,20 +3680,478 @@ const AuthPage = () => {
   );
 };
 
+const RequireAuth = ({ user, children }: { user: FirebaseUser | null; children: React.ReactNode }) => {
+  const navigate = useNavigate();
+  useEffect(() => {
+    if (!user) navigate('/auth');
+  }, [user, navigate]);
+  if (!user) return null;
+  return <>{children}</>;
+};
+
+const RequireAdmin = ({ user, role, children }: { user: FirebaseUser | null; role: UserRole | null; children: React.ReactNode }) => {
+  const navigate = useNavigate();
+  useEffect(() => {
+    if (!user) navigate('/auth');
+    else if (role && role !== 'admin') navigate('/');
+  }, [user, role, navigate]);
+  if (!user || role !== 'admin') return null;
+  return <>{children}</>;
+};
+
+async function publishFromRequest(reqId: string, req: ListingRequest, reviewerUid: string) {
+  if (!req.publishedCollection) {
+    throw new Error('Missing publishedCollection on request.');
+  }
+  const publishedRef = await addDoc(collection(db, req.publishedCollection), req.data);
+  await updateDoc(doc(db, 'listingRequests', reqId), {
+    status: 'published',
+    feePaid: true,
+    reviewedAt: new Date().toISOString(),
+    reviewedBy: reviewerUid,
+    publishedId: publishedRef.id,
+  });
+  await addDoc(collection(db, 'notifications'), {
+    userId: req.vendorId,
+    title: 'Listing approved',
+    message: `Your ${formatListingType(req.type)} listing is now live.`,
+    createdAt: new Date().toISOString(),
+    read: false,
+    kind: 'approval',
+    refType: 'listingRequest',
+    refId: reqId,
+  } satisfies Omit<AppNotification, 'id'>);
+  return publishedRef.id;
+}
+
+const UserDashboard = ({ user }: { user: FirebaseUser }) => {
+  const [requests, setRequests] = useState<(ListingRequest & { id: string })[]>([]);
+  const [notifications, setNotifications] = useState<(AppNotification & { id: string })[]>([]);
+  const [transactions, setTransactions] = useState<(Transaction & { id: string })[]>([]);
+  const [bookings, setBookings] = useState<(Booking & { id: string })[]>([]);
+  const [tab, setTab] = useState<'bookings' | 'listings' | 'notifications'>('bookings');
+  const [payingId, setPayingId] = useState<string | null>(null);
+  const [payError, setPayError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const q = query(collection(db, 'listingRequests'), where('vendorId', '==', user.uid), orderBy('createdAt', 'desc'));
+    return onSnapshot(q, (snap) => {
+      setRequests(snap.docs.map(d => ({ id: d.id, ...(d.data() as ListingRequest) })));
+    });
+  }, [user.uid]);
+
+  useEffect(() => {
+    const q = query(collection(db, 'notifications'), where('userId', '==', user.uid), orderBy('createdAt', 'desc'));
+    return onSnapshot(q, (snap) => {
+      setNotifications(snap.docs.map(d => ({ id: d.id, ...(d.data() as AppNotification) })));
+    });
+  }, [user.uid]);
+
+  useEffect(() => {
+    const q = query(collection(db, 'transactions'), where('userId', '==', user.uid), orderBy('createdAt', 'desc'));
+    return onSnapshot(q, (snap) => {
+      setTransactions(snap.docs.map(d => ({ id: d.id, ...(d.data() as Transaction) })));
+    });
+  }, [user.uid]);
+
+  useEffect(() => {
+    const q = query(collection(db, 'bookings'), where('userId', '==', user.uid), orderBy('createdAt', 'desc'));
+    return onSnapshot(q, (snap) => {
+      setBookings(snap.docs.map(d => ({ id: d.id, ...(d.data() as Booking) })));
+    });
+  }, [user.uid]);
+
+  const payListingFee = async (reqId: string) => {
+    const req = requests.find(r => r.id === reqId);
+    if (!req) return;
+    if (req.feeRequired <= 0) return;
+
+    setPayError(null);
+    setPayingId(reqId);
+
+    const sdkLoaded = await loadRazorpayScript();
+    if (!sdkLoaded) {
+      setPayError('Razorpay SDK failed to load. Check your internet and try again.');
+      setPayingId(null);
+      return;
+    }
+
+    try {
+      const orderResponse = await fetch('/api/razorpay/order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          amount: req.feeRequired,
+          receipt: buildReceipt('listingfee', reqId),
+        }),
+      });
+      const orderPayload = await orderResponse.json();
+      if (!orderResponse.ok || !orderPayload?.order?.id) {
+        throw new Error(orderPayload?.error || 'Could not create Razorpay order.');
+      }
+
+      const razorpayKey = import.meta.env.VITE_RAZORPAY_KEY_ID as string | undefined;
+      if (!razorpayKey) throw new Error('Missing VITE_RAZORPAY_KEY_ID in frontend environment.');
+
+      const razorpay = new window.Razorpay({
+        key: razorpayKey,
+        amount: orderPayload.order.amount,
+        currency: orderPayload.order.currency,
+        name: 'Student Solution',
+        description: `Listing fee for ${formatListingType(req.type)}`,
+        order_id: orderPayload.order.id,
+        handler: async (response) => {
+          try {
+            const verifyResponse = await fetch('/api/razorpay/verify', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(response),
+            });
+            const verifyPayload = await verifyResponse.json();
+            if (!verifyResponse.ok || !verifyPayload?.isValid) {
+              throw new Error(verifyPayload?.error || 'Payment verification failed.');
+            }
+
+            await addDoc(collection(db, 'transactions'), {
+              userId: user.uid,
+              amount: req.feeRequired,
+              purpose: 'listing_fee',
+              status: 'success',
+              createdAt: new Date().toISOString(),
+              listingRequestId: reqId,
+              razorpay: {
+                orderId: response.razorpay_order_id,
+                paymentId: response.razorpay_payment_id,
+                signature: response.razorpay_signature,
+              },
+            } satisfies Omit<Transaction, 'id'>);
+
+            const requestRef = doc(db, 'listingRequests', reqId);
+            const latestSnap = await getDoc(requestRef);
+            const latest = latestSnap.data() as ListingRequest | undefined;
+            if (!latest) throw new Error('Listing request not found.');
+
+            await publishFromRequest(reqId, latest, user.uid);
+          } catch (e) {
+            setPayError(e instanceof Error ? e.message : 'Payment failed.');
+          } finally {
+            setPayingId(null);
+          }
+        },
+        modal: { ondismiss: () => setPayingId(null) },
+      });
+
+      razorpay.open();
+    } catch (e) {
+      setPayError(e instanceof Error ? e.message : 'Could not start payment.');
+      setPayingId(null);
+    }
+  };
+
+  const pendingFee = requests.filter(r => r.status === 'payment_pending');
+
+  return (
+    <div className="pt-24 pb-12 px-4 max-w-7xl mx-auto">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900">My Dashboard</h1>
+          <p className="text-gray-500">Bookings, listings, and approvals.</p>
+        </div>
+        {pendingFee.length > 0 && (
+          <div className="bg-amber-50 border border-amber-100 rounded-2xl px-5 py-3 text-amber-800 font-semibold">
+            {pendingFee.length} listing{pendingFee.length > 1 ? 's' : ''} approved — payment pending
+          </div>
+        )}
+      </div>
+
+      <div className="flex flex-wrap gap-3 mb-6">
+        <button onClick={() => setTab('bookings')} className={cn("px-4 py-2 rounded-xl font-semibold border", tab === 'bookings' ? "bg-gray-900 text-white border-gray-900" : "bg-white border-gray-100 text-gray-700")}>My Bookings</button>
+        <button onClick={() => setTab('listings')} className={cn("px-4 py-2 rounded-xl font-semibold border", tab === 'listings' ? "bg-gray-900 text-white border-gray-900" : "bg-white border-gray-100 text-gray-700")}>My Listings</button>
+        <button onClick={() => setTab('notifications')} className={cn("px-4 py-2 rounded-xl font-semibold border", tab === 'notifications' ? "bg-gray-900 text-white border-gray-900" : "bg-white border-gray-100 text-gray-700")}>Notifications</button>
+      </div>
+
+      {payError && <div className="mb-6 bg-red-50 border border-red-100 text-red-700 px-4 py-3 rounded-2xl">{payError}</div>}
+
+      {tab === 'bookings' && (
+        <div className="space-y-4">
+          {bookings.map(b => (
+            <div key={b.id} className="bg-white border border-gray-100 rounded-2xl p-5 flex items-center justify-between">
+              <div>
+                <div className="font-bold text-gray-900">{b.itemTitle}</div>
+                <div className="text-sm text-gray-500">{b.type} • {new Date(b.createdAt).toLocaleString()}</div>
+              </div>
+              <div className="font-bold text-gray-900">₹{b.amount}</div>
+            </div>
+          ))}
+          {bookings.length === 0 && <div className="text-gray-500 bg-gray-50 border border-gray-100 rounded-2xl p-6">No bookings yet.</div>}
+        </div>
+      )}
+
+      {tab === 'listings' && (
+        <div className="space-y-4">
+          {requests.map(r => (
+            <div key={r.id} className="bg-white border border-gray-100 rounded-2xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div>
+                <div className="font-bold text-gray-900">{formatListingType(r.type)}</div>
+                <div className="text-sm text-gray-500">Status: <span className="font-semibold">{r.status}</span> • {new Date(r.createdAt).toLocaleString()}</div>
+              </div>
+              {r.status === 'payment_pending' && r.feeRequired > 0 && (
+                <button
+                  onClick={() => payListingFee(r.id)}
+                  disabled={payingId === r.id}
+                  className={cn("px-5 py-2 rounded-xl font-bold text-white", payingId === r.id ? "bg-gray-400" : "bg-indigo-600 hover:bg-indigo-700")}
+                >
+                  {payingId === r.id ? 'Starting payment...' : `Pay ₹${r.feeRequired}`}
+                </button>
+              )}
+            </div>
+          ))}
+          {requests.length === 0 && <div className="text-gray-500 bg-gray-50 border border-gray-100 rounded-2xl p-6">No listing requests yet.</div>}
+        </div>
+      )}
+
+      {tab === 'notifications' && (
+        <div className="space-y-4">
+          {notifications.map(n => (
+            <div key={n.id} className="bg-white border border-gray-100 rounded-2xl p-5">
+              <div className="font-bold text-gray-900">{n.title}</div>
+              <div className="text-gray-600">{n.message}</div>
+              <div className="text-xs text-gray-400 mt-1">{new Date(n.createdAt).toLocaleString()}</div>
+            </div>
+          ))}
+          {notifications.length === 0 && <div className="text-gray-500 bg-gray-50 border border-gray-100 rounded-2xl p-6">No notifications yet.</div>}
+        </div>
+      )}
+
+      <div className="mt-10">
+        <h2 className="text-xl font-bold text-gray-900 mb-3">Transactions</h2>
+        <div className="space-y-3">
+          {transactions.slice(0, 10).map(t => (
+            <div key={t.id} className="bg-white border border-gray-100 rounded-2xl p-4 flex items-center justify-between">
+              <div className="text-sm text-gray-600">{t.purpose} • {new Date(t.createdAt).toLocaleString()}</div>
+              <div className="font-bold text-gray-900">₹{t.amount}</div>
+            </div>
+          ))}
+          {transactions.length === 0 && <div className="text-gray-500 bg-gray-50 border border-gray-100 rounded-2xl p-6">No transactions yet.</div>}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const AdminPanel = ({ user }: { user: FirebaseUser }) => {
+  const [pending, setPending] = useState<(ListingRequest & { id: string })[]>([]);
+  const [allUsersCount, setAllUsersCount] = useState<number>(0);
+  const [activeListingsCount, setActiveListingsCount] = useState<number>(0);
+  const [transactions, setTransactions] = useState<(Transaction & { id: string })[]>([]);
+  const [adminNote, setAdminNote] = useState<string | null>(null);
+  const [promoteUid, setPromoteUid] = useState('');
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const q = query(collection(db, 'listingRequests'), where('status', '==', 'pending'), orderBy('createdAt', 'desc'));
+    return onSnapshot(q, (snap) => setPending(snap.docs.map(d => ({ id: d.id, ...(d.data() as ListingRequest) }))));
+  }, []);
+
+  useEffect(() => {
+    const q = query(collection(db, 'transactions'), orderBy('createdAt', 'desc'));
+    return onSnapshot(q, (snap) => setTransactions(snap.docs.map(d => ({ id: d.id, ...(d.data() as Transaction) }))));
+  }, []);
+
+  const refreshCounts = async () => {
+    const [usersSnap, hostelsSnap, tiffinSnap, jobsSnap, itemsSnap] = await Promise.all([
+      getDocs(collection(db, 'users')),
+      getDocs(collection(db, 'hostels')),
+      getDocs(collection(db, 'tiffinServices')),
+      getDocs(collection(db, 'jobs')),
+      getDocs(collection(db, 'marketItems')),
+    ]);
+    setAllUsersCount(usersSnap.size);
+    setActiveListingsCount(hostelsSnap.size + tiffinSnap.size + jobsSnap.size + itemsSnap.size);
+  };
+
+  useEffect(() => {
+    refreshCounts().catch(() => {});
+  }, []);
+
+  const approve = async (reqId: string) => {
+    const req = pending.find(r => r.id === reqId);
+    if (!req) return;
+    setAdminNote(null);
+    setBusyId(reqId);
+    try {
+      if (req.feeRequired > 0) {
+        await updateDoc(doc(db, 'listingRequests', reqId), {
+          status: 'payment_pending',
+          reviewedAt: new Date().toISOString(),
+          reviewedBy: user.uid,
+        });
+        await addDoc(collection(db, 'notifications'), {
+          userId: req.vendorId,
+          title: 'Approved — payment required',
+          message: `Your ${formatListingType(req.type)} request was approved. Pay ₹${req.feeRequired} to publish it.`,
+          createdAt: new Date().toISOString(),
+          read: false,
+          kind: 'payment',
+          refType: 'listingRequest',
+          refId: reqId,
+        } satisfies Omit<AppNotification, 'id'>);
+      } else {
+        await publishFromRequest(reqId, req, user.uid);
+      }
+      await refreshCounts();
+    } catch (e) {
+      setAdminNote(e instanceof Error ? e.message : 'Approval failed.');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const reject = async (reqId: string) => {
+    const req = pending.find(r => r.id === reqId);
+    if (!req) return;
+    setAdminNote(null);
+    setBusyId(reqId);
+    try {
+      await updateDoc(doc(db, 'listingRequests', reqId), {
+        status: 'rejected',
+        reviewedAt: new Date().toISOString(),
+        reviewedBy: user.uid,
+      });
+      await addDoc(collection(db, 'notifications'), {
+        userId: req.vendorId,
+        title: 'Listing rejected',
+        message: `Your ${formatListingType(req.type)} request was rejected by admin.`,
+        createdAt: new Date().toISOString(),
+        read: false,
+        kind: 'approval',
+        refType: 'listingRequest',
+        refId: reqId,
+      } satisfies Omit<AppNotification, 'id'>);
+    } catch (e) {
+      setAdminNote(e instanceof Error ? e.message : 'Rejection failed.');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const promoteToAdmin = async () => {
+    const uid = promoteUid.trim();
+    if (!uid) return;
+    setAdminNote(null);
+    try {
+      await updateDoc(doc(db, 'users', uid), { role: 'admin' });
+      setPromoteUid('');
+      setAdminNote('User promoted to admin.');
+    } catch (e) {
+      setAdminNote(e instanceof Error ? e.message : 'Could not promote user.');
+    }
+  };
+
+  const pendingCount = pending.length;
+  const listingFeeTransactions = transactions.filter(t => t.purpose === 'listing_fee');
+
+  return (
+    <div className="pt-24 pb-12 px-4 max-w-7xl mx-auto">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900">Admin Control Panel</h1>
+          <p className="text-gray-500">Approvals, users, listings, and transactions.</p>
+        </div>
+        <button onClick={() => refreshCounts()} className="px-5 py-2 rounded-xl bg-gray-900 text-white font-bold hover:bg-gray-800">Refresh</button>
+      </div>
+
+      {adminNote && <div className="mb-6 bg-indigo-50 border border-indigo-100 text-indigo-800 px-4 py-3 rounded-2xl">{adminNote}</div>}
+
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-10">
+        <div className="bg-white border border-gray-100 rounded-2xl p-5">
+          <div className="text-xs font-bold text-gray-400 uppercase">Total active listings</div>
+          <div className="text-3xl font-extrabold text-gray-900 mt-2">{activeListingsCount}</div>
+        </div>
+        <div className="bg-white border border-gray-100 rounded-2xl p-5">
+          <div className="text-xs font-bold text-gray-400 uppercase">Total users</div>
+          <div className="text-3xl font-extrabold text-gray-900 mt-2">{allUsersCount}</div>
+        </div>
+        <div className="bg-white border border-gray-100 rounded-2xl p-5">
+          <div className="text-xs font-bold text-gray-400 uppercase">Registered users</div>
+          <div className="text-3xl font-extrabold text-gray-900 mt-2">{allUsersCount}</div>
+        </div>
+        <div className="bg-white border border-gray-100 rounded-2xl p-5">
+          <div className="text-xs font-bold text-gray-400 uppercase">Pending approvals</div>
+          <div className="text-3xl font-extrabold text-gray-900 mt-2">{pendingCount}</div>
+        </div>
+      </div>
+
+      <div className="bg-white border border-gray-100 rounded-2xl p-6 mb-10">
+        <h2 className="text-xl font-bold text-gray-900 mb-4">Pending approval requests</h2>
+        <div className="space-y-4">
+          {pending.map(r => (
+            <div key={r.id} className="border border-gray-100 rounded-2xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div>
+                <div className="font-bold text-gray-900">{formatListingType(r.type)}</div>
+                <div className="text-sm text-gray-500">Vendor: {r.vendorName} • {new Date(r.createdAt).toLocaleString()}</div>
+                <div className="text-sm text-gray-500">Fee: ₹{r.feeRequired}</div>
+              </div>
+              <div className="flex gap-3">
+                <button disabled={busyId === r.id} onClick={() => approve(r.id)} className={cn("px-5 py-2 rounded-xl font-bold text-white", busyId === r.id ? "bg-gray-400" : "bg-emerald-600 hover:bg-emerald-700")}>Approve</button>
+                <button disabled={busyId === r.id} onClick={() => reject(r.id)} className={cn("px-5 py-2 rounded-xl font-bold text-white", busyId === r.id ? "bg-gray-400" : "bg-red-600 hover:bg-red-700")}>Reject</button>
+              </div>
+            </div>
+          ))}
+          {pending.length === 0 && <div className="text-gray-500 bg-gray-50 border border-gray-100 rounded-2xl p-6">No pending requests.</div>}
+        </div>
+      </div>
+
+      <div className="bg-white border border-gray-100 rounded-2xl p-6 mb-10">
+        <h2 className="text-xl font-bold text-gray-900 mb-4">Transaction history</h2>
+        <div className="space-y-3">
+          {listingFeeTransactions.slice(0, 20).map(t => (
+            <div key={t.id} className="border border-gray-100 rounded-2xl p-4 flex items-center justify-between">
+              <div className="text-sm text-gray-600">{t.userId} • {new Date(t.createdAt).toLocaleString()}</div>
+              <div className="font-bold text-gray-900">₹{t.amount}</div>
+            </div>
+          ))}
+          {listingFeeTransactions.length === 0 && <div className="text-gray-500 bg-gray-50 border border-gray-100 rounded-2xl p-6">No listing fee transactions yet.</div>}
+        </div>
+      </div>
+
+      <div className="bg-white border border-gray-100 rounded-2xl p-6">
+        <h2 className="text-xl font-bold text-gray-900 mb-4">Make another person admin</h2>
+        <div className="flex flex-col md:flex-row gap-3">
+          <input value={promoteUid} onChange={(e) => setPromoteUid(e.target.value)} placeholder="Enter user UID" className="flex-1 px-4 py-3 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500" />
+          <button onClick={promoteToAdmin} className="px-6 py-3 rounded-2xl bg-indigo-600 text-white font-bold hover:bg-indigo-700">Promote</button>
+        </div>
+        <p className="text-xs text-gray-500 mt-2">Note: user must already have a profile in <span className="font-mono">users/&lt;uid&gt;</span>.</p>
+      </div>
+    </div>
+  );
+};
+
 // --- Main App ---
 
 export default function App() {
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [loading, setLoading] = useState(true);
   const [isDarkMode, setIsDarkMode] = useState(false);
+  const [role, setRole] = useState<UserRole | null>(null);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (u) => {
       setUser(u);
+      setRole(null);
       setLoading(false);
     });
     return () => unsubscribe();
   }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    const userRef = doc(db, 'users', user.uid);
+    return onSnapshot(userRef, (snap) => {
+      const data = snap.data() as UserData | undefined;
+      setRole((data?.role || 'user') as UserRole);
+    });
+  }, [user?.uid]);
 
   const handleLogout = async () => {
     await signOut(auth);
@@ -3479,6 +4184,16 @@ export default function App() {
           <main>
             <Routes>
               <Route path="/" element={<Dashboard />} />
+              <Route path="/dashboard" element={
+                <RequireAuth user={user}>
+                  <UserDashboard user={user as FirebaseUser} />
+                </RequireAuth>
+              } />
+              <Route path="/admin" element={
+                <RequireAdmin user={user} role={role}>
+                  <AdminPanel user={user as FirebaseUser} />
+                </RequireAdmin>
+              } />
               <Route path="/hostels" element={<FindMyStay user={user} />} />
               <Route path="/tiffin" element={<TiffinMate user={user} />} />
               <Route path="/swap" element={<StudentSwap user={user} />} />
